@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend build-datamanagementd test test-backend test-frontend test-datamanagementd secret-scan
+.PHONY: build build-backend build-frontend build-datamanagementd test test-backend test-frontend test-datamanagementd secret-scan gen-pricing-hash
 
 # 一键编译前后端
 build: build-backend build-frontend
@@ -30,3 +30,9 @@ test-datamanagementd:
 
 secret-scan:
 	@python3 tools/secret_scan.py
+
+# 生成价格文件 SHA256（每次修改 model_prices_and_context_window.json 后执行）
+PRICING_FILE := backend/resources/model-pricing/model_prices_and_context_window.json
+gen-pricing-hash:
+	@sha256sum $(PRICING_FILE) | awk '{print $$1}' > $(PRICING_FILE:.json=.sha256)
+	@echo "SHA256 已更新: $$(cat $(PRICING_FILE:.json=.sha256))"
