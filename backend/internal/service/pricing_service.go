@@ -173,7 +173,26 @@ func (s *PricingService) checkAndUpdatePricing() error {
 		return s.downloadPricingData()
 	}
 
-	// 检查文件是否过期
+	// 如果配置了 HashURL，优先用 hash 比对决定是否更新
+	if s.cfg.Pricing.HashURL != "" {
+		remoteHash, err := s.fetchRemoteHash()
+		if err != nil {
+			logger.LegacyPrintf("service.pricing", "[Pricing] Failed to fetch remote hash on startup: %v", err)
+		} else {
+			localHash, err := s.computeFileHash(pricingFile)
+			if err != nil || remoteHash != localHash {
+				logger.LegacyPrintf("service.pricing", "%s", "[Pricing] Hash mismatch on startup, downloading new version...")
+				if err := s.downloadPricingData(); err != nil {
+					logger.LegacyPrintf("service.pricing", "[Pricing] Download failed, using existing file: %v", err)
+				}
+				return s.loadPricingData(pricingFile)
+			}
+			logger.LegacyPrintf("service.pricing", "%s", "[Pricing] Hash check passed on startup, using cached file")
+			return s.loadPricingData(pricingFile)
+		}
+	}
+
+	// 无 HashURL 时，回退到时间检查
 	info, err := os.Stat(pricingFile)
 	if err != nil {
 		return s.downloadPricingData()
