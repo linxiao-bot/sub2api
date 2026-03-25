@@ -3871,6 +3871,117 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 	return result
 }
 
+// cchBillingSalt 是 Claude Code 客户端内置的混淆盐值
+const cchBillingSalt = "59cf53e54c78"
+
+// cchCCVersion 与抓包观测到的 Claude Code 客户端版本一致
+const cchCCVersion = "2.1.78"
+
+// computeBillingHeader 按 CCH 算法计算 x-anthropic-billing-header 字符串。
+// 算法输入：第一条 user 消息的文本内容。
+// 输出格式：x-anthropic-billing-header: cc_version=X.Y.Z.abc; cc_entrypoint=cli; cch=12345;
+func computeBillingHeader(body []byte) string {
+	// 提取第一条 user 消息的文本内容
+	messageText := ""
+	messages := gjson.GetBytes(body, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("role").String() != "user" {
+				return true
+			}
+			content := item.Get("content")
+			switch {
+			case content.Type == gjson.String:
+				messageText = content.String()
+			case content.IsArray():
+				var sb strings.Builder
+				content.ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "text" {
+						sb.WriteString(block.Get("text").String())
+					}
+					return true
+				})
+				messageText = sb.String()
+			}
+			return false // 只取第一条 user 消息
+		})
+	}
+
+	// Step 1: cch = SHA-256(messageText)[:5]
+	msgHash := sha256.Sum256([]byte(messageText))
+	cch := fmt.Sprintf("%x", msgHash)[:5]
+
+	// Step 2: sampled = messageText[4] + messageText[7] + messageText[20]（越界补 "0"）
+	runes := []rune(messageText)
+	sampled := make([]byte, 3)
+	for i, idx := range []int{4, 7, 20} {
+		if idx < len(runes) {
+			sampled[i] = byte(runes[idx])
+		} else {
+			sampled[i] = '0'
+		}
+	}
+	versionInput := cchBillingSalt + string(sampled) + cchCCVersion
+	verHash := sha256.Sum256([]byte(versionInput))
+	versionHash := fmt.Sprintf("%x", verHash)[:3]
+
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=%s;",
+		cchCCVersion, versionHash, cch)
+}
+
+// injectBillingHeader 移除请求体 system 中已有的 billing header，并在首位注入重新计算的版本。
+func injectBillingHeader(body []byte) []byte {
+	headerText := computeBillingHeader(body)
+	billingBlock := fmt.Sprintf(`{"type":"text","text":%s}`, mustMarshalString(headerText))
+
+	sys := gjson.GetBytes(body, "system")
+
+	switch {
+	case !sys.Exists() || (sys.Type == gjson.Null):
+		// 无 system：创建只含 billing header 的数组
+		if next, ok := setJSONRawBytes(body, "system", []byte("["+billingBlock+"]")); ok {
+			return next
+		}
+
+	case sys.Type == gjson.String:
+		// string 格式：转为 [billing, original]
+		origBlock := fmt.Sprintf(`{"type":"text","text":%s}`, mustMarshalString(sys.String()))
+		arr := "[" + billingBlock + "," + origBlock + "]"
+		if next, ok := setJSONRawBytes(body, "system", []byte(arr)); ok {
+			return next
+		}
+
+	case sys.IsArray():
+		// 数组格式：过滤旧 billing header，在首位插入新的
+		var items []string
+		items = append(items, billingBlock)
+		sys.ForEach(func(_, item gjson.Result) bool {
+			text := item.Get("text")
+			if item.Get("type").String() == "text" && text.Exists() &&
+				strings.HasPrefix(strings.TrimSpace(text.String()), "x-anthropic-billing-header") {
+				return true // 跳过旧 billing header
+			}
+			items = append(items, item.Raw)
+			return true
+		})
+		arr := "[" + strings.Join(items, ",") + "]"
+		if next, ok := setJSONRawBytes(body, "system", []byte(arr)); ok {
+			return next
+		}
+	}
+
+	return body
+}
+
+// mustMarshalString 将字符串 JSON 序列化（含转义），失败时返回双引号包裹的原始值。
+func mustMarshalString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `"` + s + `"`
+	}
+	return string(b)
+}
+
 type cacheControlPath struct {
 	path string
 	log  string
@@ -4074,6 +4185,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+	}
+
+	// 为 OAuth 账号注入 x-anthropic-billing-header（CCH 算法）
+	// Console OAuth token 必须携带此 header，否则上游会以 403 拒绝
+	if account.IsOAuth() {
+		body = injectBillingHeader(body)
 	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）
@@ -7902,6 +8019,11 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	if shouldMimicClaudeCode {
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+	}
+
+	// 为 OAuth 账号注入 x-anthropic-billing-header（CCH 算法）
+	if account.IsOAuth() {
+		body = injectBillingHeader(body)
 	}
 
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
