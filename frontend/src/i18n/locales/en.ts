@@ -1984,6 +1984,10 @@ export default {
       privacyTrainingOff: 'Training data sharing disabled',
       privacyCfBlocked: 'Blocked by Cloudflare, training may still be on',
       privacyFailed: 'Failed to disable training',
+      privacyAntigravitySet: 'Telemetry and marketing emails disabled',
+      privacyAntigravityFailed: 'Privacy setting failed',
+      setPrivacy: 'Set Privacy',
+      subscriptionAbnormal: 'Abnormal',
       // Capacity status tooltips
       capacity: {
         windowCost: {
@@ -4171,6 +4175,14 @@ export default {
         allowUngroupedKey: 'Allow Ungrouped Key Scheduling',
         allowUngroupedKeyHint: 'When disabled, API Keys not assigned to any group cannot make requests (403 Forbidden). Keep disabled to ensure all Keys belong to a specific group.'
       },
+      gatewayForwarding: {
+        title: 'Request Forwarding',
+        description: 'Control how requests are forwarded to upstream OAuth accounts',
+        fingerprintUnification: 'Fingerprint Unification',
+        fingerprintUnificationHint: 'Unify X-Stainless-* headers across users sharing the same OAuth account. Disabling passes through each client\'s original headers.',
+        metadataPassthrough: 'Metadata Passthrough',
+        metadataPassthroughHint: 'Pass through client\'s original metadata.user_id without rewriting. May improve upstream cache hit rates.',
+      },
       site: {
         title: 'Site Settings',
         description: 'Customize site branding',
@@ -4461,6 +4473,14 @@ export default {
         thinkingSignatureHint: 'Automatically strip signatures and retry when upstream returns thinking block signature validation errors',
         thinkingBudget: 'Thinking Budget Rectifier',
         thinkingBudgetHint: 'Automatically set budget to 32000 and retry when upstream returns budget_tokens constraint error (≥1024)',
+        apikeySignature: 'API Key Signature Rectifier',
+        apikeySignatureHint:
+          'Automatically strip signatures and retry when API Key accounts receive signature-related errors (built-in patterns always apply)',
+        apikeyPatterns: 'Custom Match Patterns',
+        apikeyPatternsHint:
+          'Additional keywords matched against the response body (case-insensitive). Built-in patterns always apply; use these for supplementary matching.',
+        apikeyPatternPlaceholder: 'e.g., thinking_error',
+        addPattern: 'Add Pattern',
         saved: 'Rectifier settings saved',
         saveFailed: 'Failed to save rectifier settings'
       },

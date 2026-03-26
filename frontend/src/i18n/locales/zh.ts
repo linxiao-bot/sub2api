@@ -2022,6 +2022,10 @@ export default {
       privacyTrainingOff: '已关闭训练数据共享',
       privacyCfBlocked: '被 Cloudflare 拦截，训练可能仍开启',
       privacyFailed: '关闭训练数据共享失败',
+      privacyAntigravitySet: '已关闭遥测和营销邮件',
+      privacyAntigravityFailed: '隐私设置失败',
+      setPrivacy: '设置隐私',
+      subscriptionAbnormal: '异常',
       // 容量状态提示
       capacity: {
         windowCost: {
@@ -4334,6 +4338,14 @@ export default {
         allowUngroupedKey: '允许未分组 Key 调度',
         allowUngroupedKeyHint: '关闭后，未分配到任何分组的 API Key 将无法发起请求（返回 403）。建议保持关闭以确保所有 Key 都归属明确的分组。'
       },
+      gatewayForwarding: {
+        title: '请求转发行为',
+        description: '控制请求转发到上游 OAuth 账号时的行为',
+        fingerprintUnification: '指纹统一化',
+        fingerprintUnificationHint: '统一共享同一 OAuth 账号的用户的 X-Stainless-* 请求头。关闭后透传客户端原始请求头。',
+        metadataPassthrough: 'Metadata 透传',
+        metadataPassthroughHint: '透传客户端原始 metadata.user_id，不进行重写。可能提高上游缓存命中率。',
+      },
       site: {
         title: '站点设置',
         description: '自定义站点品牌',
@@ -4625,6 +4637,14 @@ export default {
         thinkingSignatureHint: '当上游返回 thinking block 签名校验错误时，自动去除签名并重试',
         thinkingBudget: 'Thinking Budget 整流',
         thinkingBudgetHint: '当上游返回 budget_tokens 约束错误（≥1024）时，自动将 budget 设为 32000 并重试',
+        apikeySignature: 'API Key 签名整流',
+        apikeySignatureHint:
+          '当 API Key 账号的上游返回签名相关错误时，自动去除签名并重试（内置规则始终生效）',
+        apikeyPatterns: '自定义匹配关键词',
+        apikeyPatternsHint:
+          '额外的关键词，匹配响应体中的内容（不区分大小写）。内置规则始终生效，此处用于补充额外匹配。',
+        apikeyPatternPlaceholder: '例如：thinking_error 或 签名无效',
+        addPattern: '添加关键词',
         saved: '整流器设置保存成功',
         saveFailed: '保存整流器设置失败'
       },
