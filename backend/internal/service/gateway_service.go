@@ -2403,6 +2403,9 @@ func (s *GatewayService) hasCapacityAtLowerPriority(ctx context.Context, account
 			minPriority = acc.Priority
 		}
 	}
+	if minPriority >= threshold {
+		return false // 不存在比 threshold 更低的优先级账号
+	}
 	var targets []AccountWithConcurrency
 	for _, acc := range accounts {
 		if acc.Priority == minPriority {
