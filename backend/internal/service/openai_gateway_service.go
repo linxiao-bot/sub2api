@@ -1101,6 +1101,9 @@ func (s *OpenAIGatewayService) BindStickySession(ctx context.Context, groupID *i
 	if sessionHash == "" || accountID <= 0 {
 		return nil
 	}
+	if s != nil && s.cfg != nil && !s.cfg.Gateway.OpenAIWS.StickySessionEnabled {
+		return nil
+	}
 	ttl := openaiStickySessionTTL
 	if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds > 0 {
 		ttl = time.Duration(s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds) * time.Second
