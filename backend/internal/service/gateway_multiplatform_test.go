@@ -194,6 +194,9 @@ func (m *mockAccountRepoForPlatform) IncrementQuotaUsed(ctx context.Context, id 
 func (m *mockAccountRepoForPlatform) ResetQuotaUsed(ctx context.Context, id int64) error {
 	return nil
 }
+func (m *mockAccountRepoForPlatform) MaxPriorityByPlatform(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // Verify interface implementation
 var _ AccountRepository = (*mockAccountRepoForPlatform)(nil)

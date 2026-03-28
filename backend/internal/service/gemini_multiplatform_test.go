@@ -183,6 +183,9 @@ func (m *mockAccountRepoForGemini) IncrementQuotaUsed(ctx context.Context, id in
 func (m *mockAccountRepoForGemini) ResetQuotaUsed(ctx context.Context, id int64) error {
 	return nil
 }
+func (m *mockAccountRepoForGemini) MaxPriorityByPlatform(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // Verify interface implementation
 var _ AccountRepository = (*mockAccountRepoForGemini)(nil)
