@@ -67,7 +67,12 @@ func NewBodyLogWriter(cfg *config.BodyLogConfig) *BodyLogWriter {
 	if dir == "" {
 		dataDir := os.Getenv("DATA_DIR")
 		if dataDir == "" {
-			dataDir = "."
+			// Match setup.GetDataDir() fallback: prefer /app/data if writable.
+			if info, err := os.Stat("/app/data"); err == nil && info.IsDir() {
+				dataDir = "/app/data"
+			} else {
+				dataDir = "."
+			}
 		}
 		dir = filepath.Join(dataDir, "body_logs")
 	}

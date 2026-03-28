@@ -1002,6 +1002,15 @@ update:
 # Bodies are written to local NDJSON files, then periodically compressed and
 # uploaded to S3 (reuses the backup S3 configuration).
 # 写入本地 NDJSON 文件，定时 gzip 压缩后上传到 S3（复用备份 S3 配置）。
+#
+# PREREQUISITE / 前置条件:
+#   S3 upload requires the backup S3 storage to be configured first via the
+#   admin web UI (Admin Panel -> Backup -> S3 Configuration).
+#   S3 上传功能依赖备份 S3 存储配置，请先在管理后台配置：
+#   管理面板 -> 备份管理 -> S3 存储配置。
+#   If S3 is not configured, files will remain on local disk and be cleaned
+#   up after retain_local_hours.
+#   如果未配置 S3，文件将保留在本地磁盘，超过 retain_local_hours 后自动清理。
 body_log:
   # Master switch / 总开关
   enabled: false

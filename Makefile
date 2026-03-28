@@ -7,6 +7,9 @@ build: build-backend build-frontend
 build-backend:
 	@$(MAKE) -C backend build
 
+build-docker:
+	docker build --push -t heishui/sub2api:cc  .
+
 # 编译前端（需要已安装依赖）
 build-frontend:
 	@pnpm --dir frontend run build
