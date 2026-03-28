@@ -1464,6 +1464,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
+			// 优先级抢占：若存在比绑定账号优先级更小的候选账号，放弃粘性，由 Layer 2 重新调度并更新绑定。
+			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
+				ok = false
+			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
 				// Check if the account needs sticky session cleanup
@@ -2383,6 +2387,20 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 		}
 	}
 	return result
+}
+
+// minPriorityAmongAccounts 返回账号列表中的最小优先级值，列表为空时返回 0。
+func minPriorityAmongAccounts(accounts []Account) int {
+	if len(accounts) == 0 {
+		return 0
+	}
+	min := accounts[0].Priority
+	for _, acc := range accounts[1:] {
+		if acc.Priority < min {
+			min = acc.Priority
+		}
+	}
+	return min
 }
 
 // filterByMinLoadRate 过滤出负载率最低的账号集合
