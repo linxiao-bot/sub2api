@@ -993,3 +993,33 @@ update:
   # Leave empty for direct connection (recommended for overseas servers)
   # 留空表示直连（适用于海外服务器）
   proxy_url: ""
+
+# =============================================================================
+# Body Log Configuration (请求/响应体日志)
+# =============================================================================
+# Records full request and response bodies for successful API calls.
+# 记录成功 API 调用的完整请求体和响应体。
+# Bodies are written to local NDJSON files, then periodically compressed and
+# uploaded to S3 (reuses the backup S3 configuration).
+# 写入本地 NDJSON 文件，定时 gzip 压缩后上传到 S3（复用备份 S3 配置）。
+body_log:
+  # Master switch / 总开关
+  enabled: false
+  # Local directory for NDJSON files (default: $DATA_DIR/body_logs)
+  # 本地 NDJSON 文件目录（默认：$DATA_DIR/body_logs）
+  local_dir: ""
+  # Max single file size in MB before rotation / 单文件大小上限（MB），超过后自动轮转
+  max_file_size_mb: 50
+  # Max captured response size per request in MB (safety valve) / 单次捕获上限（MB）
+  max_capture_size_mb: 10
+  # Cron schedule for compressing and uploading completed files to S3
+  # S3 上传 cron 表达式
+  upload_schedule: "7 * * * *"
+  # Hours to retain local files after upload / 上传后本地保留时长（小时）
+  retain_local_hours: 24
+  # S3 key prefix (uses backup S3 bucket) / S3 对象前缀（复用备份 S3 bucket）
+  s3_prefix: "body_logs/"
+  # Async writer worker count / 异步写入 worker 数
+  worker_count: 4
+  # Bounded queue size / 队列大小
+  queue_size: 4096

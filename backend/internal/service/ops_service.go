@@ -477,6 +477,25 @@ func sanitizeAndTrimRequestBody(raw []byte, maxBytes int) (jsonString string, tr
 	return string(encoded4), true, bytesLen
 }
 
+// RedactSensitiveJSONBytes parses raw JSON, replaces sensitive keys with
+// "[REDACTED]", and returns the re-encoded result. On any error, the
+// original bytes are returned as-is.
+func RedactSensitiveJSONBytes(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	decoded = redactSensitiveJSON(decoded)
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
 func redactSensitiveJSON(v any) any {
 	switch t := v.(type) {
 	case map[string]any:

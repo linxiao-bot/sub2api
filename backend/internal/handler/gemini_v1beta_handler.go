@@ -181,6 +181,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, modelName, stream, body)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(stream, false)))
 
@@ -538,6 +542,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			zap.Int64("account_id", account.ID),
 			zap.Int("switch_count", fs.SwitchCount),
 		)
+		bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }

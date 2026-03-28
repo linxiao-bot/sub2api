@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -88,7 +89,13 @@ func ProvideHandlers(
 	totpHandler *TotpHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
+	bodyLogWriter *service.BodyLogWriter,
+	cfg *config.Config,
 ) *Handlers {
+	// Initialise the package-level body-log state used by all gateway handlers.
+	if bodyLogWriter != nil && cfg != nil {
+		InitBodyLog(bodyLogWriter, &cfg.BodyLog)
+	}
 	return &Handlers{
 		Auth:          authHandler,
 		User:          userHandler,

@@ -59,6 +59,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, "", false, body)
 
 	// Validate JSON
@@ -262,6 +266,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				)
 			}
 		})
+		bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }

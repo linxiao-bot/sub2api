@@ -128,6 +128,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, "", false, body)
 	sessionHashBody := body
 	if service.IsOpenAIResponsesCompactPathForTest(c) {
@@ -394,6 +398,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Int64("account_id", account.ID),
 			zap.Int("switch_count", switchCount),
 		)
+		bodyLogEnqueue(bodyCapture, body, bodyLogResultFromOpenAI(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }
@@ -529,6 +534,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture2, bodyCaptureDone2 := bodyLogInstallCapture(c)
+	defer bodyCaptureDone2()
 
 	if !gjson.ValidBytes(body) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
@@ -773,6 +782,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			zap.Int64("account_id", account.ID),
 			zap.Int("switch_count", switchCount),
 		)
+		bodyLogEnqueue(bodyCapture2, body, bodyLogResultFromOpenAI(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }

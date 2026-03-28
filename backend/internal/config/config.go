@@ -83,6 +83,7 @@ type Config struct {
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
+	BodyLog                 BodyLogConfig                 `mapstructure:"body_log"`
 }
 
 type LogConfig struct {
@@ -144,6 +145,27 @@ type UpdateConfig struct {
 	// 支持 http/https/socks5/socks5h 协议
 	// 例如: "http://127.0.0.1:7890", "socks5://127.0.0.1:1080"
 	ProxyURL string `mapstructure:"proxy_url"`
+}
+
+type BodyLogConfig struct {
+	// Enabled 总开关，默认 false。
+	Enabled bool `mapstructure:"enabled"`
+	// LocalDir 本地 NDJSON 文件存放目录。
+	LocalDir string `mapstructure:"local_dir"`
+	// MaxFileSizeMB 单个 NDJSON 文件大小上限（MB），超过后自动 rotate。
+	MaxFileSizeMB int `mapstructure:"max_file_size_mb"`
+	// MaxCaptureSizeMB 单次请求响应体捕获上限（MB），超过后放弃捕获。
+	MaxCaptureSizeMB int `mapstructure:"max_capture_size_mb"`
+	// UploadSchedule S3 上传 cron 表达式。
+	UploadSchedule string `mapstructure:"upload_schedule"`
+	// RetainLocalHours 本地文件保留时长（小时），过期后清理。
+	RetainLocalHours int `mapstructure:"retain_local_hours"`
+	// S3Prefix S3 对象 key 前缀，复用 backup S3 配置。
+	S3Prefix string `mapstructure:"s3_prefix"`
+	// WorkerCount 异步写入 worker 数。
+	WorkerCount int `mapstructure:"worker_count"`
+	// QueueSize 入队缓冲区大小。
+	QueueSize int `mapstructure:"queue_size"`
 }
 
 type IdempotencyConfig struct {
@@ -1324,6 +1346,17 @@ func setDefaults() {
 	viper.SetDefault("idempotency.cleanup_interval_seconds", 60)
 	viper.SetDefault("idempotency.cleanup_batch_size", 500)
 
+	// BodyLog
+	viper.SetDefault("body_log.enabled", false)
+	viper.SetDefault("body_log.local_dir", "")
+	viper.SetDefault("body_log.max_file_size_mb", 50)
+	viper.SetDefault("body_log.max_capture_size_mb", 10)
+	viper.SetDefault("body_log.upload_schedule", "7 * * * *")
+	viper.SetDefault("body_log.retain_local_hours", 24)
+	viper.SetDefault("body_log.s3_prefix", "body_logs/")
+	viper.SetDefault("body_log.worker_count", 4)
+	viper.SetDefault("body_log.queue_size", 4096)
+
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.log_upstream_error_body", true)
@@ -2235,6 +2268,29 @@ func (c *Config) Validate() error {
 	if c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30 {
 		return fmt.Errorf("concurrency.ping_interval must be between 5-30 seconds")
 	}
+
+	// BodyLog
+	if c.BodyLog.Enabled {
+		if c.BodyLog.MaxFileSizeMB <= 0 {
+			return fmt.Errorf("body_log.max_file_size_mb must be positive")
+		}
+		if c.BodyLog.MaxCaptureSizeMB <= 0 {
+			return fmt.Errorf("body_log.max_capture_size_mb must be positive")
+		}
+		if c.BodyLog.WorkerCount <= 0 {
+			return fmt.Errorf("body_log.worker_count must be positive")
+		}
+		if c.BodyLog.QueueSize <= 0 {
+			return fmt.Errorf("body_log.queue_size must be positive")
+		}
+		if c.BodyLog.RetainLocalHours <= 0 {
+			return fmt.Errorf("body_log.retain_local_hours must be positive")
+		}
+		if strings.TrimSpace(c.BodyLog.UploadSchedule) == "" {
+			return fmt.Errorf("body_log.upload_schedule is required when body_log is enabled")
+		}
+	}
+
 	return nil
 }
 

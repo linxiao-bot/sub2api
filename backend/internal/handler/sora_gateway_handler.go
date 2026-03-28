@@ -121,6 +121,10 @@ func (h *SoraGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, "", false, body)
 
 	// 校验请求体 JSON 合法性
@@ -435,6 +439,7 @@ func (h *SoraGatewayHandler) ChatCompletions(c *gin.Context) {
 			zap.Bool("tls_fingerprint_enabled", tlsFingerprintEnabled),
 			zap.Int("switch_count", switchCount),
 		)
+		bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }

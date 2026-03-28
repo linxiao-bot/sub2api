@@ -1001,6 +1001,16 @@ func (s *BackupService) getOrCreateStore(ctx context.Context, cfg *BackupS3Confi
 	return store, nil
 }
 
+// GetObjectStore returns a ready-to-use BackupObjectStore using the persisted
+// S3 configuration. It is safe for concurrent use (store is cached internally).
+func (s *BackupService) GetObjectStore(ctx context.Context) (BackupObjectStore, error) {
+	cfg, err := s.loadS3Config(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.getOrCreateStore(ctx, cfg)
+}
+
 func (s *BackupService) buildS3Key(cfg *BackupS3Config, fileName string) string {
 	prefix := strings.TrimRight(cfg.Prefix, "/")
 	if prefix == "" {

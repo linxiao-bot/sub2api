@@ -147,6 +147,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, "", false, body)
 
 	parsedReq, err := service.ParseGatewayRequest(body, domain.PlatformAnthropic)
@@ -489,6 +493,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					).Error("gateway.record_usage_failed", zap.Error(err))
 				}
 			})
+			bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result),apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 			return
 		}
 	}
@@ -821,6 +826,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					).Error("gateway.record_usage_failed", zap.Error(err))
 				}
 			})
+			bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result),currentAPIKey, account, account.Platform, c.Request.URL.Path, clientIP)
 			return
 		}
 		if !retryWithFallback {
