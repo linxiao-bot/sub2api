@@ -2013,6 +2013,7 @@ export default {
         groups: '分组',
         usageWindows: '用量窗口',
         proxy: '代理',
+        createdAt: '添加时间',
         lastUsed: '最近使用',
         expiresAt: '过期时间',
         actions: '操作'
@@ -2483,6 +2484,7 @@ export default {
       proxy: '代理',
       noProxy: '无代理',
       concurrency: '并发数',
+      concurrencyFixed: '创建时固定为 50，创建后可修改',
       loadFactor: '负载因子',
       loadFactorHint: '提高负载因子可以提高对账号的调度频率',
       priority: '优先级',

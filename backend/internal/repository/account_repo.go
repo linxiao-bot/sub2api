@@ -1915,6 +1915,19 @@ func (r *accountRepository) IncrementQuotaUsed(ctx context.Context, id int64, am
 	return nil
 }
 
+// MaxPriorityByPlatform 返回指定平台下所有未删除账号的最大 priority 值。
+// 当该平台无账号时返回 0，新账号应使用 max+1 作为优先级。
+func (r *accountRepository) MaxPriorityByPlatform(ctx context.Context, platform string) (int, error) {
+	var max int
+	err := scanSingleRow(ctx, r.sql,
+		`SELECT COALESCE(MAX(priority), 0) FROM accounts WHERE platform = $1 AND deleted_at IS NULL`,
+		[]any{platform}, &max)
+	if err != nil {
+		return 0, err
+	}
+	return max, nil
+}
+
 // ResetQuotaUsed 重置账号所有维度的配额用量为 0
 // 保留固定重置模式的配置字段（quota_daily_reset_mode 等），仅清零用量和窗口起始时间
 func (r *accountRepository) ResetQuotaUsed(ctx context.Context, id int64) error {

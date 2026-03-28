@@ -1521,6 +1521,12 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 	}
 
+	// 自动分配优先级：取当前平台最大优先级 + 1，确保新账号排在最后
+	nextPriority := 1
+	if maxP, err := s.accountRepo.MaxPriorityByPlatform(ctx, input.Platform); err == nil {
+		nextPriority = maxP + 1
+	}
+
 	account := &Account{
 		Name:        input.Name,
 		Notes:       normalizeAccountNotes(input.Notes),
@@ -1529,8 +1535,8 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		Credentials: input.Credentials,
 		Extra:       input.Extra,
 		ProxyID:     input.ProxyID,
-		Concurrency: input.Concurrency,
-		Priority:    input.Priority,
+		Concurrency: 50,
+		Priority:    nextPriority,
 		Status:      StatusActive,
 		Schedulable: true,
 	}

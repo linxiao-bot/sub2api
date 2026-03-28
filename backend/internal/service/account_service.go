@@ -51,6 +51,9 @@ type AccountRepository interface {
 	AutoPauseExpiredAccounts(ctx context.Context, now time.Time) (int64, error)
 	BindGroups(ctx context.Context, accountID int64, groupIDs []int64) error
 
+	// MaxPriorityByPlatform 返回指定平台下所有账号的最大优先级值，无账号时返回 0。
+	MaxPriorityByPlatform(ctx context.Context, platform string) (int, error)
+
 	ListSchedulable(ctx context.Context) ([]Account, error)
 	ListSchedulableByGroupID(ctx context.Context, groupID int64) ([]Account, error)
 	ListSchedulableByPlatform(ctx context.Context, platform string) ([]Account, error)

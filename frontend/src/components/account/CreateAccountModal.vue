@@ -2247,8 +2247,8 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" min="1" class="input"
-            @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+          <input type="number" :value="50" disabled class="input opacity-60 cursor-not-allowed" />
+          <p class="input-hint">{{ t('admin.accounts.concurrencyFixed') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -3196,7 +3196,7 @@ const form = reactive({
   type: 'oauth' as AccountType, // Will be 'oauth', 'setup-token', or 'apikey'
   credentials: {} as Record<string, unknown>,
   proxy_id: null as number | null,
-  concurrency: 10,
+  concurrency: 50,
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
@@ -3694,7 +3694,7 @@ const resetForm = () => {
   form.type = 'oauth'
   form.credentials = {}
   form.proxy_id = null
-  form.concurrency = 10
+  form.concurrency = 50
   form.load_factor = null
   form.priority = 1
   form.rate_multiplier = 1

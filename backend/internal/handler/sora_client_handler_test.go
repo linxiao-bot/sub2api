@@ -2156,6 +2156,9 @@ func (r *stubAccountRepoForHandler) IncrementQuotaUsed(context.Context, int64, f
 func (r *stubAccountRepoForHandler) ResetQuotaUsed(context.Context, int64) error {
 	return nil
 }
+func (r *stubAccountRepoForHandler) MaxPriorityByPlatform(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // ==================== Stub: SoraClient (用于 SoraGatewayService) ====================
 

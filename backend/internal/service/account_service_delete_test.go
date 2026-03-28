@@ -206,6 +206,7 @@ func (s *accountRepoStub) IncrementQuotaUsed(ctx context.Context, id int64, amou
 func (s *accountRepoStub) ResetQuotaUsed(ctx context.Context, id int64) error {
 	return nil
 }
+func (s *accountRepoStub) MaxPriorityByPlatform(context.Context, string) (int, error) { return 0, nil }
 
 // TestAccountService_Delete_NotFound 测试删除不存在的账号时返回正确的错误。
 // 预期行为：

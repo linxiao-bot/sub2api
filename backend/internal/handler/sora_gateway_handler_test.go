@@ -223,6 +223,7 @@ func (r *stubAccountRepo) IncrementQuotaUsed(ctx context.Context, id int64, amou
 func (r *stubAccountRepo) ResetQuotaUsed(ctx context.Context, id int64) error {
 	return nil
 }
+func (r *stubAccountRepo) MaxPriorityByPlatform(context.Context, string) (int, error) { return 0, nil }
 
 func (r *stubAccountRepo) listSchedulable() []service.Account {
 	var result []service.Account

@@ -1975,6 +1975,7 @@ export default {
         groups: 'Groups',
         usageWindows: 'Usage Windows',
         proxy: 'Proxy',
+        createdAt: 'Added At',
         lastUsed: 'Last Used',
         expiresAt: 'Expires At',
         actions: 'Actions'
@@ -2339,6 +2340,7 @@ export default {
       proxy: 'Proxy',
       noProxy: 'No Proxy',
       concurrency: 'Concurrency',
+      concurrencyFixed: 'Fixed at 50 on creation, can be changed afterwards',
       loadFactor: 'Load Factor',
       loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',
