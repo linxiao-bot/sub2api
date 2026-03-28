@@ -526,7 +526,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Extra:                 req.Extra,
 			ProxyID:               req.ProxyID,
 			Concurrency:           req.Concurrency,
-			Priority:              req.Priority,
+			Priority:              0, // 优先级由系统自动分配，不允许手动修改
 			RateMultiplier:        req.RateMultiplier,
 			LoadFactor:            req.LoadFactor,
 			GroupIDs:              req.GroupIDs,
@@ -600,7 +600,7 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		Extra:                 req.Extra,
 		ProxyID:               req.ProxyID,
 		Concurrency:           req.Concurrency, // 指针类型，nil 表示未提供
-		Priority:              req.Priority,    // 指针类型，nil 表示未提供
+		Priority:              nil, // 优先级由系统自动分配，不允许手动修改
 		RateMultiplier:        req.RateMultiplier,
 		LoadFactor:            req.LoadFactor,
 		Status:                req.Status,
@@ -1374,7 +1374,6 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	hasUpdates := req.Name != "" ||
 		req.ProxyID != nil ||
 		req.Concurrency != nil ||
-		req.Priority != nil ||
 		req.RateMultiplier != nil ||
 		req.LoadFactor != nil ||
 		req.Status != "" ||
@@ -1393,7 +1392,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 		Name:                  req.Name,
 		ProxyID:               req.ProxyID,
 		Concurrency:           req.Concurrency,
-		Priority:              req.Priority,
+		Priority:              nil, // 优先级由系统自动分配，不允许手动修改
 		RateMultiplier:        req.RateMultiplier,
 		LoadFactor:            req.LoadFactor,
 		Status:                req.Status,
