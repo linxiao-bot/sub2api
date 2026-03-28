@@ -1464,9 +1464,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			// 优先级抢占：若存在比绑定账号优先级更小的候选账号，放弃粘性，由 Layer 2 重新调度并更新绑定。
+			// 负载感知优先级抢占：低优先级账号有空余容量时才放弃粘性，避免低优先级满载时的无效抢占。
 			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
-				ok = false
+				if s.hasCapacityAtLowerPriority(ctx, accounts, account.Priority) {
+					ok = false
+				}
 			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
@@ -2387,6 +2389,42 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 		}
 	}
 	return result
+}
+
+// hasCapacityAtLowerPriority 检查是否存在优先级低于 threshold 且有空余容量（loadRate < 100）的账号。
+// 用于粘性会话的负载感知优先级抢占：只有低优先级账号确实有空位时才抢占，避免无效迁移。
+func (s *GatewayService) hasCapacityAtLowerPriority(ctx context.Context, accounts []Account, threshold int) bool {
+	if s.concurrencyService == nil {
+		return false
+	}
+	minPriority := threshold
+	for _, acc := range accounts {
+		if acc.Priority < minPriority {
+			minPriority = acc.Priority
+		}
+	}
+	var targets []AccountWithConcurrency
+	for _, acc := range accounts {
+		if acc.Priority == minPriority {
+			targets = append(targets, AccountWithConcurrency{
+				ID:             acc.ID,
+				MaxConcurrency: acc.EffectiveLoadFactor(),
+			})
+		}
+	}
+	if len(targets) == 0 {
+		return false
+	}
+	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, targets)
+	if err != nil {
+		return false
+	}
+	for _, info := range loadMap {
+		if info.LoadRate < 100 {
+			return true
+		}
+	}
+	return false
 }
 
 // minPriorityAmongAccounts 返回账号列表中的最小优先级值，列表为空时返回 0。
