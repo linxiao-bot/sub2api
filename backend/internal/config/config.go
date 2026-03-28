@@ -603,6 +603,8 @@ type GatewayOpenAIWSConfig struct {
 
 	// 账号调度与粘连参数
 	LBTopK int `mapstructure:"lb_top_k"`
+	// StickySessionEnabled: 是否启用 session_hash -> account_id 粘连；设为 false 则每次请求走 load balance
+	StickySessionEnabled bool `mapstructure:"sticky_session_enabled"`
 	// StickySessionTTLSeconds: session_hash -> account_id 粘连 TTL
 	StickySessionTTLSeconds int `mapstructure:"sticky_session_ttl_seconds"`
 	// SessionHashReadOldFallback: 会话哈希迁移期是否允许“新 key 未命中时回退读旧 SHA-256 key”
@@ -1418,6 +1420,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.retry_total_budget_ms", 5000)
 	viper.SetDefault("gateway.openai_ws.payload_log_sample_rate", 0.2)
 	viper.SetDefault("gateway.openai_ws.lb_top_k", 1)
+	viper.SetDefault("gateway.openai_ws.sticky_session_enabled", true)
 	viper.SetDefault("gateway.openai_ws.sticky_session_ttl_seconds", 3600)
 	viper.SetDefault("gateway.openai_ws.session_hash_read_old_fallback", true)
 	viper.SetDefault("gateway.openai_ws.session_hash_dual_write_old", true)

@@ -267,6 +267,8 @@ gateway:
     payload_log_sample_rate: 0.2
     # 调度与粘连参数
     lb_top_k: 7
+    # 是否启用 session_hash -> account_id 粘连；设为 false 每次请求走 load balance（严格优先级调度时可关闭）
+    sticky_session_enabled: true
     sticky_session_ttl_seconds: 3600
     # 会话哈希迁移兼容开关：新 key 未命中时回退读取旧 SHA-256 key
     session_hash_read_old_fallback: true

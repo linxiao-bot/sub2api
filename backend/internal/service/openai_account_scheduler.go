@@ -261,9 +261,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	selection, err := s.selectBySessionHash(ctx, req)
-	if err != nil {
-		return nil, decision, err
+	var selection *AccountSelectionResult
+	var err error
+	if s.service.openAIWSStickSessionEnabled() {
+		selection, err = s.selectBySessionHash(ctx, req)
+		if err != nil {
+			return nil, decision, err
+		}
 	}
 	if selection != nil && selection.Account != nil {
 		decision.Layer = openAIAccountScheduleLayerSessionSticky
@@ -871,6 +875,13 @@ func (s *OpenAIGatewayService) openAIWSSessionStickyTTL() time.Duration {
 		return time.Duration(s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds) * time.Second
 	}
 	return openaiStickySessionTTL
+}
+
+func (s *OpenAIGatewayService) openAIWSStickSessionEnabled() bool {
+	if s != nil && s.cfg != nil {
+		return s.cfg.Gateway.OpenAIWS.StickySessionEnabled
+	}
+	return true
 }
 
 func (s *OpenAIGatewayService) openAIWSLBTopK() int {
