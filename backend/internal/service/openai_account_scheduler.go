@@ -891,7 +891,7 @@ func (s *OpenAIGatewayService) openAIWSSchedulerWeights() GatewayOpenAIWSSchedul
 		}
 	}
 	return GatewayOpenAIWSSchedulerScoreWeightsView{
-		Priority:  1.0,
+		Priority:  3.0,
 		Load:      1.0,
 		Queue:     0.7,
 		ErrorRate: 0.8,
