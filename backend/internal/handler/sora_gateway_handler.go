@@ -121,6 +121,10 @@ func (h *SoraGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// Install body-log capture writer (no-op if body logging is disabled).
+	bodyCapture, bodyCaptureDone := bodyLogInstallCapture(c)
+	defer bodyCaptureDone()
+
 	setOpsRequestContext(c, "", false, body)
 
 	// 校验请求体 JSON 合法性
@@ -159,6 +163,7 @@ func (h *SoraGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	setOpsRequestContext(c, reqModel, clientStream, body)
+	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(clientStream, false)))
 
 	platform := ""
 	if forced, ok := middleware2.GetForcePlatformFromContext(c); ok {
@@ -434,6 +439,7 @@ func (h *SoraGatewayHandler) ChatCompletions(c *gin.Context) {
 			zap.Bool("tls_fingerprint_enabled", tlsFingerprintEnabled),
 			zap.Int("switch_count", switchCount),
 		)
+		bodyLogEnqueue(bodyCapture, body, bodyLogResultFromForward(result), apiKey, account, account.Platform, c.Request.URL.Path, clientIP)
 		return
 	}
 }
@@ -484,6 +490,9 @@ func (h *SoraGatewayHandler) handleConcurrencyError(c *gin.Context, err error, s
 }
 
 func (h *SoraGatewayHandler) handleFailoverExhausted(c *gin.Context, statusCode int, responseHeaders http.Header, responseBody []byte, streamStarted bool) {
+	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
+
 	status, errType, errMsg := h.mapUpstreamError(statusCode, responseHeaders, responseBody)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }

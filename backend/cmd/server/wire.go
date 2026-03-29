@@ -95,6 +95,8 @@ func provideCleanup(
 	openAIGateway *service.OpenAIGatewayService,
 	scheduledTestRunner *service.ScheduledTestRunnerService,
 	backupSvc *service.BackupService,
+	bodyLogUpload *service.BodyLogUploadService,
+	bodyLogWriter *service.BodyLogWriter,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -228,6 +230,18 @@ func provideCleanup(
 			{"ScheduledTestRunnerService", func() error {
 				if scheduledTestRunner != nil {
 					scheduledTestRunner.Stop()
+				}
+				return nil
+			}},
+			{"BodyLogUploadService", func() error {
+				if bodyLogUpload != nil {
+					bodyLogUpload.Stop()
+				}
+				return nil
+			}},
+			{"BodyLogWriter", func() error {
+				if bodyLogWriter != nil {
+					bodyLogWriter.Stop()
 				}
 				return nil
 			}},

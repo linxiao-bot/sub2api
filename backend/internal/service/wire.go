@@ -114,11 +114,13 @@ func ProvideAntigravityTokenProvider(
 	tokenCache GeminiTokenCache,
 	antigravityOAuthService *AntigravityOAuthService,
 	refreshAPI *OAuthRefreshAPI,
+	tempUnschedCache TempUnschedCache,
 ) *AntigravityTokenProvider {
 	p := NewAntigravityTokenProvider(accountRepo, tokenCache, antigravityOAuthService)
 	executor := NewAntigravityTokenRefresher(antigravityOAuthService)
 	p.SetRefreshAPI(refreshAPI, executor)
 	p.SetRefreshPolicy(AntigravityProviderRefreshPolicy())
+	p.SetTempUnschedCache(tempUnschedCache)
 	return p
 }
 
@@ -480,6 +482,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageCache,
 	NewTotpService,
 	NewErrorPassthroughService,
+	NewTLSFingerprintProfileService,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,
 	ProvideSystemOperationLockService,
@@ -487,4 +490,32 @@ var ProviderSet = wire.NewSet(
 	ProvideScheduledTestService,
 	ProvideScheduledTestRunnerService,
 	NewGroupCapacityService,
+	ProvideBodyLogWriter,
+	ProvideBodyLogUploadService,
 )
+
+// ProvideBodyLogWriter creates and starts the body log writer if enabled.
+func ProvideBodyLogWriter(cfg *config.Config) *BodyLogWriter {
+	if cfg == nil || !cfg.BodyLog.Enabled {
+		return nil
+	}
+	w := NewBodyLogWriter(&cfg.BodyLog)
+	w.Start()
+	return w
+}
+
+// ProvideBodyLogUploadService creates and starts the body log upload cron
+// service if enabled. Reuses the backup S3 configuration.
+func ProvideBodyLogUploadService(
+	writer *BodyLogWriter,
+	backupSvc *BackupService,
+	cfg *config.Config,
+	redisClient *redis.Client,
+) *BodyLogUploadService {
+	if cfg == nil || !cfg.BodyLog.Enabled || writer == nil {
+		return nil
+	}
+	svc := NewBodyLogUploadService(writer, backupSvc, &cfg.BodyLog, cfg.Timezone, redisClient)
+	svc.Start()
+	return svc
+}

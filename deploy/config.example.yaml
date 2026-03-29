@@ -865,12 +865,12 @@ rate_limit:
 # 定价数据源（可选）
 # =============================================================================
 pricing:
-  # URL to fetch model pricing data (default: pinned model-price-repo commit)
-  # 获取模型定价数据的 URL（默认：固定 commit 的 model-price-repo）
-  remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/c7947e9871687e664180bc971d4837f1fc2784a9/model_prices_and_context_window.json"
+  # URL to fetch model pricing data (default: self-maintained cc branch)
+  # 获取模型定价数据的 URL（默认：自维护 cc 分支）
+  remote_url: "https://raw.githubusercontent.com/xilu0/sub2api/cc/backend/resources/model-pricing/model_prices_and_context_window.json"
   # Hash verification URL (optional)
   # 哈希校验 URL（可选）
-  hash_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/c7947e9871687e664180bc971d4837f1fc2784a9/model_prices_and_context_window.sha256"
+  hash_url: "https://raw.githubusercontent.com/xilu0/sub2api/cc/backend/resources/model-pricing/model_prices_and_context_window.sha256"
   # Local data directory for caching
   # 本地数据缓存目录
   data_dir: "./data"
@@ -995,3 +995,42 @@ update:
   # Leave empty for direct connection (recommended for overseas servers)
   # 留空表示直连（适用于海外服务器）
   proxy_url: ""
+
+# =============================================================================
+# Body Log Configuration (请求/响应体日志)
+# =============================================================================
+# Records full request and response bodies for successful API calls.
+# 记录成功 API 调用的完整请求体和响应体。
+# Bodies are written to local NDJSON files, then periodically compressed and
+# uploaded to S3 (reuses the backup S3 configuration).
+# 写入本地 NDJSON 文件，定时 gzip 压缩后上传到 S3（复用备份 S3 配置）。
+#
+# PREREQUISITE / 前置条件:
+#   S3 upload requires the backup S3 storage to be configured first via the
+#   admin web UI (Admin Panel -> Backup -> S3 Configuration).
+#   S3 上传功能依赖备份 S3 存储配置，请先在管理后台配置：
+#   管理面板 -> 备份管理 -> S3 存储配置。
+#   If S3 is not configured, files will remain on local disk and be cleaned
+#   up after retain_local_hours.
+#   如果未配置 S3，文件将保留在本地磁盘，超过 retain_local_hours 后自动清理。
+body_log:
+  # Master switch / 总开关
+  enabled: false
+  # Local directory for NDJSON files (default: $DATA_DIR/body_logs)
+  # 本地 NDJSON 文件目录（默认：$DATA_DIR/body_logs）
+  local_dir: ""
+  # Max single file size in MB before rotation / 单文件大小上限（MB），超过后自动轮转
+  max_file_size_mb: 50
+  # Max captured response size per request in MB (safety valve) / 单次捕获上限（MB）
+  max_capture_size_mb: 10
+  # Cron schedule for compressing and uploading completed files to S3
+  # S3 上传 cron 表达式
+  upload_schedule: "7 * * * *"
+  # Hours to retain local files after upload / 上传后本地保留时长（小时）
+  retain_local_hours: 24
+  # S3 key prefix (uses backup S3 bucket) / S3 对象前缀（复用备份 S3 bucket）
+  s3_prefix: "body_logs/"
+  # Async writer worker count / 异步写入 worker 数
+  worker_count: 4
+  # Bounded queue size / 队列大小
+  queue_size: 4096

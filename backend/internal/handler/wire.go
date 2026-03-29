@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -30,33 +31,35 @@ func ProvideAdminHandlers(
 	usageHandler *admin.UsageHandler,
 	userAttributeHandler *admin.UserAttributeHandler,
 	errorPassthroughHandler *admin.ErrorPassthroughHandler,
+	tlsFingerprintProfileHandler *admin.TLSFingerprintProfileHandler,
 	apiKeyHandler *admin.AdminAPIKeyHandler,
 	scheduledTestHandler *admin.ScheduledTestHandler,
 ) *AdminHandlers {
 	return &AdminHandlers{
-		Dashboard:        dashboardHandler,
-		User:             userHandler,
-		Group:            groupHandler,
-		Account:          accountHandler,
-		Announcement:     announcementHandler,
-		DataManagement:   dataManagementHandler,
-		Backup:           backupHandler,
-		OAuth:            oauthHandler,
-		OpenAIOAuth:      openaiOAuthHandler,
-		GeminiOAuth:      geminiOAuthHandler,
-		AntigravityOAuth: antigravityOAuthHandler,
-		Proxy:            proxyHandler,
-		Redeem:           redeemHandler,
-		Promo:            promoHandler,
-		Setting:          settingHandler,
-		Ops:              opsHandler,
-		System:           systemHandler,
-		Subscription:     subscriptionHandler,
-		Usage:            usageHandler,
-		UserAttribute:    userAttributeHandler,
-		ErrorPassthrough: errorPassthroughHandler,
-		APIKey:           apiKeyHandler,
-		ScheduledTest:    scheduledTestHandler,
+		Dashboard:             dashboardHandler,
+		User:                  userHandler,
+		Group:                 groupHandler,
+		Account:               accountHandler,
+		Announcement:          announcementHandler,
+		DataManagement:        dataManagementHandler,
+		Backup:                backupHandler,
+		OAuth:                 oauthHandler,
+		OpenAIOAuth:           openaiOAuthHandler,
+		GeminiOAuth:           geminiOAuthHandler,
+		AntigravityOAuth:      antigravityOAuthHandler,
+		Proxy:                 proxyHandler,
+		Redeem:                redeemHandler,
+		Promo:                 promoHandler,
+		Setting:               settingHandler,
+		Ops:                   opsHandler,
+		System:                systemHandler,
+		Subscription:          subscriptionHandler,
+		Usage:                 usageHandler,
+		UserAttribute:         userAttributeHandler,
+		ErrorPassthrough:      errorPassthroughHandler,
+		TLSFingerprintProfile: tlsFingerprintProfileHandler,
+		APIKey:                apiKeyHandler,
+		ScheduledTest:         scheduledTestHandler,
 	}
 }
 
@@ -88,7 +91,13 @@ func ProvideHandlers(
 	totpHandler *TotpHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
+	bodyLogWriter *service.BodyLogWriter,
+	cfg *config.Config,
 ) *Handlers {
+	// Initialise the package-level body-log state used by all gateway handlers.
+	if bodyLogWriter != nil && cfg != nil {
+		InitBodyLog(bodyLogWriter, &cfg.BodyLog)
+	}
 	return &Handlers{
 		Auth:          authHandler,
 		User:          userHandler,
@@ -145,6 +154,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewUsageHandler,
 	admin.NewUserAttributeHandler,
 	admin.NewErrorPassthroughHandler,
+	admin.NewTLSFingerprintProfileHandler,
 	admin.NewAdminAPIKeyHandler,
 	admin.NewScheduledTestHandler,
 
