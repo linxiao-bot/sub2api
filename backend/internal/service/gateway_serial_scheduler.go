@@ -92,8 +92,8 @@ func (gs *groupScheduler) schedule(task *groupScheduleTask) (*AccountSelectionRe
 	}
 }
 
-// getOrCreateGroupScheduler 获取或懒创建指定 (group, model) 的串行调度器。
-// key 格式为 "groupID:model"，同组不同模型独立串行，避免头阻塞。
+// getOrCreateGroupScheduler 获取或懒创建指定分组的串行调度器（per-group 粒度）。
+// 同组所有模型共用一个 goroutine，消除跨模型的账号池 TOCTOU 竞争。
 // 支持未经 NewGatewayService 初始化的测试用例（直接构造 struct）。
 func (s *GatewayService) getOrCreateGroupScheduler(key string) *groupScheduler {
 	s.groupSchedulersMu.Lock()

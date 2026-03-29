@@ -1326,10 +1326,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
 
-	// 通过串行调度器选号，消除同分组同模型并发请求的 TOCTOU 竞争
-	// key = "groupID:model"，同组不同模型独立串行，避免 opus/sonnet/haiku 互相阻塞
-	schedulerKey := fmt.Sprintf("%d:%s", derefGroupID(groupID), requestedModel)
-	gs := s.getOrCreateGroupScheduler(schedulerKey)
+	// 通过串行调度器选号，消除同分组并发请求的 TOCTOU 竞争
+	// per-group 粒度：同组所有模型共用一个 goroutine，彻底消除跨模型账号池竞争
+	gs := s.getOrCreateGroupScheduler(fmt.Sprintf("%d", derefGroupID(groupID)))
 	task := &groupScheduleTask{
 		ctx:              ctx,
 		group:            group,
