@@ -3440,8 +3440,8 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 		require.Equal(t, int64(1), cache.sessionBindings["sess"], "session 应重新绑定到 priority=100 账号")
 	})
 
-	t.Run("粘性账号非最低优先级且低优先级满载-仍抢占走Layer2溢出", func(t *testing.T) {
-		// session 绑定在 priority=101，priority=100 满载 → 仍然忽略 sticky，Layer 2 溢出选 priority=101
+	t.Run("粘性账号非最低优先级但低优先级满载-保留粘性避免抖动", func(t *testing.T) {
+		// session 绑定在 priority=101，priority=100 满载 → 低优先级无空余，保留粘性，返回 priority=101
 		repo := newRepo([]Account{
 			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
 			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
@@ -3466,8 +3466,8 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 
 		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
 		require.NoError(t, err)
-		// 忽略 sticky，Layer 2：priority=100 满载不在 available，溢出选 priority=101
-		require.Equal(t, int64(2), result.Account.ID, "priority=100 满载时 Layer 2 应溢出到 priority=101")
+		// 低优先级全满，hasCapacityAtLowerPriority=false，保留粘性 → 返回 priority=101 的 sticky 账号
+		require.Equal(t, int64(2), result.Account.ID, "priority=100 满载时应保留粘性，返回 priority=101")
 	})
 
 	t.Run("无粘性会话-新session直接走Layer2选最低优先级", func(t *testing.T) {

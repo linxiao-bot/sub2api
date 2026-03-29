@@ -1464,14 +1464,16 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			// 严格优先级：粘性账号不是最小优先级时直接忽略粘性，走 Layer 2 重新选择，
-			// 确保低优先级账号被打满后才溢出到高优先级账号。
+			// 严格优先级抢占：低优先级账号有空余容量时才放弃粘性，重定向到更低优先级。
+			// 若所有低优先级账号均已满载（正常溢出场景），则保留粘性，避免 session 在溢出账号间反复跳动。
 			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
-				if s.debugModelRoutingEnabled() {
-					logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d min_priority=%d",
-						derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, minPriorityAmongAccounts(accounts))
+				if s.hasCapacityAtLowerPriority(ctx, accounts, account.Priority) {
+					if s.debugModelRoutingEnabled() {
+						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d min_priority=%d",
+							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, minPriorityAmongAccounts(accounts))
+					}
+					ok = false
 				}
-				ok = false
 			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
