@@ -94,9 +94,6 @@ func (a *Account) EffectiveLoadFactor() int {
 	if a == nil {
 		return 1
 	}
-	if a.LoadFactor != nil && *a.LoadFactor > 0 {
-		return *a.LoadFactor
-	}
 	if a.Concurrency > 0 {
 		return a.Concurrency
 	}
