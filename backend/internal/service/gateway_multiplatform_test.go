@@ -3440,8 +3440,8 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 		require.Equal(t, int64(1), cache.sessionBindings["sess"], "session 应重新绑定到 priority=100 账号")
 	})
 
-	t.Run("粘性账号非最低优先级但低优先级满载-不抢占", func(t *testing.T) {
-		// session 绑定在 priority=101，priority=100 满载 → 不抢占，继续用 priority=101
+	t.Run("粘性账号非最低优先级且低优先级满载-仍抢占走Layer2溢出", func(t *testing.T) {
+		// session 绑定在 priority=101，priority=100 满载 → 仍然忽略 sticky，Layer 2 溢出选 priority=101
 		repo := newRepo([]Account{
 			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
 			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
@@ -3453,7 +3453,7 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 		cfg.Gateway.Scheduling.LoadBatchEnabled = true
 		concurrencyCache := &mockConcurrencyCache{
 			loadMap: map[int64]*AccountLoadInfo{
-				1: {AccountID: 1, LoadRate: 100},
+				1: {AccountID: 1, LoadRate: 100}, // priority=100 满载
 				2: {AccountID: 2, LoadRate: 0},
 			},
 		}
@@ -3466,7 +3466,8 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 
 		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
 		require.NoError(t, err)
-		require.Equal(t, int64(2), result.Account.ID, "priority=100 满载时应继续复用 priority=101 账号")
+		// 忽略 sticky，Layer 2：priority=100 满载不在 available，溢出选 priority=101
+		require.Equal(t, int64(2), result.Account.ID, "priority=100 满载时 Layer 2 应溢出到 priority=101")
 	})
 
 	t.Run("无粘性会话-新session直接走Layer2选最低优先级", func(t *testing.T) {

@@ -1464,11 +1464,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			// 负载感知优先级抢占：低优先级账号有空余容量时才放弃粘性，避免低优先级满载时的无效抢占。
+			// 严格优先级：粘性账号不是最小优先级时直接忽略粘性，走 Layer 2 重新选择，
+			// 确保低优先级账号被打满后才溢出到高优先级账号。
 			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
-				if s.hasCapacityAtLowerPriority(ctx, accounts, account.Priority) {
-					ok = false
-				}
+				ok = false
 			}
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
