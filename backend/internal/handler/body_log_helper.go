@@ -97,6 +97,16 @@ func bodyLogEnqueue(
 	}
 
 	sanitizedReq := service.RedactSensitiveJSONBytes(requestBody)
+	if !json.Valid(sanitizedReq) {
+		sanitizedReq, _ = json.Marshal(string(sanitizedReq))
+	}
+
+	var respBody json.RawMessage
+	if json.Valid(captured) {
+		respBody = json.RawMessage(captured)
+	} else {
+		respBody, _ = json.Marshal(string(captured))
+	}
 
 	entry := &service.BodyLogEntry{
 		RequestID:    result.RequestID,
@@ -106,7 +116,7 @@ func bodyLogEnqueue(
 		Platform:     platform,
 		DurationMs:   result.DurationMs,
 		RequestBody:  sanitizedReq,
-		ResponseBody: json.RawMessage(captured),
+		ResponseBody: respBody,
 		RequestPath:  requestPath,
 		ClientIP:     clientIP,
 	}
