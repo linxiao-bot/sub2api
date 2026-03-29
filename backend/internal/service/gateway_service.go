@@ -1459,20 +1459,52 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
+	nonStickyCandidates := s.buildLoadAwareCandidates(ctx, accounts, excludedIDs, platform, useMixed, requestedModel)
+
 	// ============ Layer 1.5: 粘性会话（仅在无模型路由配置时生效） ============
 	if len(routingAccountIDs) == 0 && sessionHash != "" && stickyAccountID > 0 && !isExcluded(stickyAccountID) {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			// 严格优先级抢占：低优先级账号有空余容量时才放弃粘性，重定向到更低优先级。
-			// 若所有低优先级账号均已满载（正常溢出场景），则保留粘性，避免 session 在溢出账号间反复跳动。
-			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
-				if s.hasCapacityAtLowerPriority(ctx, accounts, account.Priority) {
+			// 严格优先级抢占：检测到低优先级账号有余量时，直接在目标账号上拿槽（与检测用同一快照）。
+			// 拿槽成功 → 绑定迁移；拿槽失败（TOCTOU：目标已满）→ 保留 sticky，不落到 Layer 2 打散。
+			// 这样并发请求会收敛到同一目标账号，而不是被 Layer 2 分散到不同账号。
+			if ok && account.Priority > minPriorityAmongAccountPtrs(nonStickyCandidates) {
+				if target := s.findLowestPriorityAccountWithCapacity(ctx, nonStickyCandidates, account.Priority); target != nil {
 					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d min_priority=%d",
-							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, minPriorityAmongAccounts(accounts))
+						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt attempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d target_account=%d target_priority=%d",
+							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, target.ID, target.Priority)
 					}
-					ok = false
+					// 直接在目标账号拿槽，消除 TOCTOU
+					if s.isAccountSchedulableForSelection(target) &&
+						s.isAccountAllowedForPlatform(target, platform, useMixed) &&
+						(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, target, requestedModel)) &&
+						s.isAccountSchedulableForModelSelection(ctx, target, requestedModel) &&
+						s.isAccountSchedulableForQuota(target) &&
+						s.isAccountSchedulableForWindowCost(ctx, target, true) &&
+						s.isAccountSchedulableForRPM(ctx, target, true) {
+						slotResult, slotErr := s.tryAcquireAccountSlot(ctx, target.ID, target.Concurrency)
+						if slotErr == nil && slotResult.Acquired {
+							if !s.checkAndRegisterSession(ctx, target, sessionHash) {
+								slotResult.ReleaseFunc()
+								// session 限制满，继续走原始 sticky 逻辑
+							} else {
+								if sessionHash != "" && s.cache != nil {
+									_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, target.ID, stickySessionTTL)
+								}
+								if s.debugModelRoutingEnabled() {
+									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt success: group_id=%v model=%s session=%s account=%d priority=%d",
+										derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), target.ID, target.Priority)
+								}
+								return &AccountSelectionResult{
+									Account:     target,
+									Acquired:    true,
+									ReleaseFunc: slotResult.ReleaseFunc,
+								}, nil
+							}
+						}
+						// 拿槽失败（TOCTOU：目标已满）→ 不修改 ok，继续用原始 sticky 账号
+					}
 				}
 			}
 			if ok {
@@ -1534,41 +1566,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	// ============ Layer 2: 负载感知选择 ============
-	candidates := make([]*Account, 0, len(accounts))
-	for i := range accounts {
-		acc := &accounts[i]
-		if isExcluded(acc.ID) {
-			continue
-		}
-		// Scheduler snapshots can be temporarily stale (bucket rebuild is throttled);
-		// re-check schedulability here so recently rate-limited/overloaded accounts
-		// are not selected again before the bucket is rebuilt.
-		if !s.isAccountSchedulableForSelection(acc) {
-			continue
-		}
-		if !s.isAccountAllowedForPlatform(acc, platform, useMixed) {
-			continue
-		}
-		if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel) {
-			continue
-		}
-		if !s.isAccountSchedulableForModelSelection(ctx, acc, requestedModel) {
-			continue
-		}
-		// 配额检查
-		if !s.isAccountSchedulableForQuota(acc) {
-			continue
-		}
-		// 窗口费用检查（非粘性会话路径）
-		if !s.isAccountSchedulableForWindowCost(ctx, acc, false) {
-			continue
-		}
-		// RPM 检查（非粘性会话路径）
-		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
-			continue
-		}
-		candidates = append(candidates, acc)
-	}
+	candidates := nonStickyCandidates
 
 	if len(candidates) == 0 {
 		return nil, ErrNoAvailableAccounts
@@ -2384,6 +2382,50 @@ func (s *GatewayService) getSchedulableAccount(ctx context.Context, accountID in
 	return s.accountRepo.GetByID(ctx, accountID)
 }
 
+func (s *GatewayService) buildLoadAwareCandidates(ctx context.Context, accounts []Account, excludedIDs map[int64]struct{}, platform string, useMixed bool, requestedModel string) []*Account {
+	isExcluded := func(accountID int64) bool {
+		if excludedIDs == nil {
+			return false
+		}
+		_, excluded := excludedIDs[accountID]
+		return excluded
+	}
+
+	candidates := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		acc := &accounts[i]
+		if isExcluded(acc.ID) {
+			continue
+		}
+		// Scheduler snapshots can be temporarily stale (bucket rebuild is throttled);
+		// re-check schedulability here so recently rate-limited/overloaded accounts
+		// are not selected again before the bucket is rebuilt.
+		if !s.isAccountSchedulableForSelection(acc) {
+			continue
+		}
+		if !s.isAccountAllowedForPlatform(acc, platform, useMixed) {
+			continue
+		}
+		if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel) {
+			continue
+		}
+		if !s.isAccountSchedulableForModelSelection(ctx, acc, requestedModel) {
+			continue
+		}
+		if !s.isAccountSchedulableForQuota(acc) {
+			continue
+		}
+		if !s.isAccountSchedulableForWindowCost(ctx, acc, false) {
+			continue
+		}
+		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
+			continue
+		}
+		candidates = append(candidates, acc)
+	}
+	return candidates
+}
+
 // filterByMinPriority 过滤出优先级最小的账号集合
 func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 	if len(accounts) == 0 {
@@ -2404,34 +2446,63 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 	return result
 }
 
-// hasCapacityAtLowerPriority 检查是否存在优先级低于 threshold 且有空余容量（loadRate < 100）的账号。
-// 用于粘性会话的负载感知优先级抢占：只有低优先级账号确实有空位时才抢占，避免无效迁移。
-func (s *GatewayService) hasCapacityAtLowerPriority(ctx context.Context, accounts []Account, threshold int) bool {
+// findLowestPriorityAccountWithCapacity 在候选集中找出优先级小于 threshold、
+// 且 LoadRate < 100% 的最低优先级账号。
+// 返回 nil 表示所有低优先级账号均已满载。
+func (s *GatewayService) findLowestPriorityAccountWithCapacity(ctx context.Context, candidates []*Account, threshold int) *Account {
 	if s.concurrencyService == nil {
-		return false
+		return nil
 	}
 	var targets []AccountWithConcurrency
-	for _, acc := range accounts {
+	accountsByID := make(map[int64]*Account, len(candidates))
+	for _, acc := range candidates {
 		if acc.Priority < threshold {
 			targets = append(targets, AccountWithConcurrency{
 				ID:             acc.ID,
 				MaxConcurrency: acc.EffectiveLoadFactor(),
 			})
+			accountsByID[acc.ID] = acc
 		}
 	}
 	if len(targets) == 0 {
-		return false
+		return nil
 	}
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, targets)
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, info := range loadMap {
+	var best *Account
+	for id, info := range loadMap {
 		if info.LoadRate < 100 {
-			return true
+			acc := accountsByID[id]
+			if acc != nil && (best == nil || acc.Priority < best.Priority) {
+				best = acc
+			}
 		}
 	}
-	return false
+	return best
+}
+
+// hasCapacityAtLowerPriority 检查是否存在优先级小于 threshold 且有空余容量的账号。
+func (s *GatewayService) hasCapacityAtLowerPriority(ctx context.Context, accounts []Account, threshold int) bool {
+	candidates := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		candidates = append(candidates, &accounts[i])
+	}
+	return s.findLowestPriorityAccountWithCapacity(ctx, candidates, threshold) != nil
+}
+
+func minPriorityAmongAccountPtrs(accounts []*Account) int {
+	if len(accounts) == 0 {
+		return 0
+	}
+	min := accounts[0].Priority
+	for _, acc := range accounts[1:] {
+		if acc.Priority < min {
+			min = acc.Priority
+		}
+	}
+	return min
 }
 
 // minPriorityAmongAccounts 返回账号列表中的最小优先级值，列表为空时返回 0。
