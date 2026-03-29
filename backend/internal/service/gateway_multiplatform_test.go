@@ -3296,3 +3296,199 @@ func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
 	require.Nil(t, gotID)
 	require.Contains(t, err.Error(), "fallback group cycle")
 }
+
+// TestGatewayService_hasCapacityAtLowerPriority 测试负载感知优先级抢占的辅助函数。
+func TestGatewayService_hasCapacityAtLowerPriority(t *testing.T) {
+	ctx := context.Background()
+
+	makeAccounts := func(idPriorityPairs ...int) []Account {
+		accounts := make([]Account, len(idPriorityPairs)/2)
+		for i := range accounts {
+			accounts[i] = Account{
+				ID:          int64(idPriorityPairs[i*2]),
+				Priority:    idPriorityPairs[i*2+1],
+				Concurrency: 10,
+				Status:      StatusActive,
+				Schedulable: true,
+				Platform:    PlatformAnthropic,
+			}
+		}
+		return accounts
+	}
+
+	t.Run("无低优先级账号-返回false", func(t *testing.T) {
+		accounts := makeAccounts(1, 100, 2, 100)
+		svc := &GatewayService{
+			concurrencyService: NewConcurrencyService(&mockConcurrencyCache{}),
+		}
+		require.False(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 100))
+	})
+
+	t.Run("低优先级账号有空余容量-返回true", func(t *testing.T) {
+		accounts := makeAccounts(1, 100, 2, 101)
+		svc := &GatewayService{
+			concurrencyService: NewConcurrencyService(&mockConcurrencyCache{
+				loadMap: map[int64]*AccountLoadInfo{
+					1: {AccountID: 1, LoadRate: 50},
+				},
+			}),
+		}
+		require.True(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 101))
+	})
+
+	t.Run("低优先级账号满载-返回false", func(t *testing.T) {
+		accounts := makeAccounts(1, 100, 2, 101)
+		svc := &GatewayService{
+			concurrencyService: NewConcurrencyService(&mockConcurrencyCache{
+				loadMap: map[int64]*AccountLoadInfo{
+					1: {AccountID: 1, LoadRate: 100},
+				},
+			}),
+		}
+		require.False(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 101))
+	})
+
+	t.Run("concurrencyService为nil-返回false", func(t *testing.T) {
+		accounts := makeAccounts(1, 100, 2, 101)
+		svc := &GatewayService{concurrencyService: nil}
+		require.False(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 101))
+	})
+
+	t.Run("最低优先级满载但次低优先级有容量-返回true", func(t *testing.T) {
+		// 场景：priority=230 限流满载，priority=231 有空余，sticky 在 priority=232
+		// 旧逻辑只查 priority=230（最低）→ 返回 false（错误）
+		// 新逻辑查所有 priority < 232 → 231 有容量 → 返回 true（正确）
+		accounts := makeAccounts(1, 230, 2, 231, 3, 232)
+		svc := &GatewayService{
+			concurrencyService: NewConcurrencyService(&mockConcurrencyCache{
+				loadMap: map[int64]*AccountLoadInfo{
+					1: {AccountID: 1, LoadRate: 100}, // 230 满载
+					2: {AccountID: 2, LoadRate: 60},  // 231 有容量
+				},
+			}),
+		}
+		require.True(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 232))
+	})
+}
+
+// TestGatewayService_PriorityPreemption 测试 Layer 1.5 的负载感知优先级抢占行为。
+func TestGatewayService_PriorityPreemption(t *testing.T) {
+	ctx := context.Background()
+
+	newRepo := func(accounts []Account) *mockAccountRepoForPlatform {
+		repo := &mockAccountRepoForPlatform{
+			accounts:     accounts,
+			accountsByID: map[int64]*Account{},
+		}
+		for i := range repo.accounts {
+			repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+		}
+		return repo
+	}
+
+	t.Run("粘性账号已是最低优先级-不抢占", func(t *testing.T) {
+		// session 绑定在 priority=100（最低），应直接复用，不触发抢占
+		repo := newRepo([]Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
+		})
+		cache := &mockGatewayCacheForPlatform{
+			sessionBindings: map[string]int64{"sess": 1},
+		}
+		cfg := testConfig()
+		cfg.Gateway.Scheduling.LoadBatchEnabled = true
+		concurrencyCache := &mockConcurrencyCache{}
+		svc := &GatewayService{
+			accountRepo:        repo,
+			cache:              cache,
+			cfg:                cfg,
+			concurrencyService: NewConcurrencyService(concurrencyCache),
+		}
+
+		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
+		require.NoError(t, err)
+		require.Equal(t, int64(1), result.Account.ID, "应复用绑定的 priority=100 账号")
+	})
+
+	t.Run("粘性账号非最低优先级且低优先级有空位-抢占迁移", func(t *testing.T) {
+		// session 绑定在 priority=101，但 priority=100 有空余 → 抢占，迁移到 priority=100
+		repo := newRepo([]Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
+		})
+		cache := &mockGatewayCacheForPlatform{
+			sessionBindings: map[string]int64{"sess": 2},
+		}
+		cfg := testConfig()
+		cfg.Gateway.Scheduling.LoadBatchEnabled = true
+		concurrencyCache := &mockConcurrencyCache{
+			loadMap: map[int64]*AccountLoadInfo{
+				1: {AccountID: 1, LoadRate: 0},
+				2: {AccountID: 2, LoadRate: 0},
+			},
+		}
+		svc := &GatewayService{
+			accountRepo:        repo,
+			cache:              cache,
+			cfg:                cfg,
+			concurrencyService: NewConcurrencyService(concurrencyCache),
+		}
+
+		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
+		require.NoError(t, err)
+		require.Equal(t, int64(1), result.Account.ID, "应迁移到 priority=100 账号")
+		require.Equal(t, int64(1), cache.sessionBindings["sess"], "session 应重新绑定到 priority=100 账号")
+	})
+
+	t.Run("粘性账号非最低优先级但低优先级满载-不抢占", func(t *testing.T) {
+		// session 绑定在 priority=101，priority=100 满载 → 不抢占，继续用 priority=101
+		repo := newRepo([]Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
+		})
+		cache := &mockGatewayCacheForPlatform{
+			sessionBindings: map[string]int64{"sess": 2},
+		}
+		cfg := testConfig()
+		cfg.Gateway.Scheduling.LoadBatchEnabled = true
+		concurrencyCache := &mockConcurrencyCache{
+			loadMap: map[int64]*AccountLoadInfo{
+				1: {AccountID: 1, LoadRate: 100},
+				2: {AccountID: 2, LoadRate: 0},
+			},
+		}
+		svc := &GatewayService{
+			accountRepo:        repo,
+			cache:              cache,
+			cfg:                cfg,
+			concurrencyService: NewConcurrencyService(concurrencyCache),
+		}
+
+		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
+		require.NoError(t, err)
+		require.Equal(t, int64(2), result.Account.ID, "priority=100 满载时应继续复用 priority=101 账号")
+	})
+
+	t.Run("无粘性会话-新session直接走Layer2选最低优先级", func(t *testing.T) {
+		// 无 session 绑定，应通过 Layer 2 选 priority=100
+		repo := newRepo([]Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
+		})
+		cache := &mockGatewayCacheForPlatform{}
+		cfg := testConfig()
+		cfg.Gateway.Scheduling.LoadBatchEnabled = true
+		concurrencyCache := &mockConcurrencyCache{}
+		svc := &GatewayService{
+			accountRepo:        repo,
+			cache:              cache,
+			cfg:                cfg,
+			concurrencyService: NewConcurrencyService(concurrencyCache),
+		}
+
+		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "new-sess", "", nil, "")
+		require.NoError(t, err)
+		require.Equal(t, int64(1), result.Account.ID, "新 session 应选 priority=100 账号")
+		require.Equal(t, int64(1), cache.sessionBindings["new-sess"], "新 session 应绑定到 priority=100 账号")
+	})
+}
