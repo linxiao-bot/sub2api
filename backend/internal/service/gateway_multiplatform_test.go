@@ -3353,6 +3353,22 @@ func TestGatewayService_hasCapacityAtLowerPriority(t *testing.T) {
 		svc := &GatewayService{concurrencyService: nil}
 		require.False(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 101))
 	})
+
+	t.Run("最低优先级满载但次低优先级有容量-返回true", func(t *testing.T) {
+		// 场景：priority=230 限流满载，priority=231 有空余，sticky 在 priority=232
+		// 旧逻辑只查 priority=230（最低）→ 返回 false（错误）
+		// 新逻辑查所有 priority < 232 → 231 有容量 → 返回 true（正确）
+		accounts := makeAccounts(1, 230, 2, 231, 3, 232)
+		svc := &GatewayService{
+			concurrencyService: NewConcurrencyService(&mockConcurrencyCache{
+				loadMap: map[int64]*AccountLoadInfo{
+					1: {AccountID: 1, LoadRate: 100}, // 230 满载
+					2: {AccountID: 2, LoadRate: 60},  // 231 有容量
+				},
+			}),
+		}
+		require.True(t, svc.hasCapacityAtLowerPriority(ctx, accounts, 232))
+	})
 }
 
 // TestGatewayService_PriorityPreemption 测试 Layer 1.5 的负载感知优先级抢占行为。
