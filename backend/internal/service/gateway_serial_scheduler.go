@@ -92,19 +92,20 @@ func (gs *groupScheduler) schedule(task *groupScheduleTask) (*AccountSelectionRe
 	}
 }
 
-// getOrCreateGroupScheduler 获取或懒创建指定分组的串行调度器。
+// getOrCreateGroupScheduler 获取或懒创建指定 (group, model) 的串行调度器。
+// key 格式为 "groupID:model"，同组不同模型独立串行，避免头阻塞。
 // 支持未经 NewGatewayService 初始化的测试用例（直接构造 struct）。
-func (s *GatewayService) getOrCreateGroupScheduler(gid int64) *groupScheduler {
+func (s *GatewayService) getOrCreateGroupScheduler(key string) *groupScheduler {
 	s.groupSchedulersMu.Lock()
 	defer s.groupSchedulersMu.Unlock()
 	if s.groupSchedulers == nil {
-		s.groupSchedulers = make(map[int64]*groupScheduler)
+		s.groupSchedulers = make(map[string]*groupScheduler)
 	}
-	if gs, ok := s.groupSchedulers[gid]; ok {
+	if gs, ok := s.groupSchedulers[key]; ok {
 		return gs
 	}
 	gs := newGroupScheduler(s)
-	s.groupSchedulers[gid] = gs
+	s.groupSchedulers[key] = gs
 	return gs
 }
 

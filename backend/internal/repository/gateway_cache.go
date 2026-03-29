@@ -67,7 +67,9 @@ local curPriority
 if sep then
     curPriority = tonumber(string.sub(current, sep + 1))
 else
-    curPriority = 2147483647
+    -- 旧格式（无优先级后缀）：无法比较，拒绝覆写，等 TTL 自然过期。
+    -- 避免新请求用已知优先级账号覆盖旧格式中可能更优的绑定。
+    return 0
 end
 
 if newPriority < curPriority then

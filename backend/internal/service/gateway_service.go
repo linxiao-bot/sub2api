@@ -574,8 +574,8 @@ type GatewayService struct {
 	debugGatewayBodyFile  atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
 	tlsFPProfileService   *TLSFingerprintProfileService
 
-	// 串行调度器：每个分组一个 goroutine，消除并发 TOCTOU（见 gateway_serial_scheduler.go）
-	groupSchedulers   map[int64]*groupScheduler
+	// 串行调度器：每个 (group, model) 一个 goroutine，消除并发 TOCTOU（见 gateway_serial_scheduler.go）
+	groupSchedulers   map[string]*groupScheduler
 	groupSchedulersMu sync.Mutex
 }
 
@@ -636,7 +636,7 @@ func NewGatewayService(
 		modelsListCacheTTL:   modelsListTTL,
 		responseHeaderFilter: compileResponseHeaderFilter(cfg),
 		tlsFPProfileService:  tlsFPProfileService,
-		groupSchedulers:      make(map[int64]*groupScheduler),
+		groupSchedulers:      make(map[string]*groupScheduler),
 	}
 	svc.userGroupRateResolver = newUserGroupRateResolver(
 		userGroupRateRepo,
@@ -1326,8 +1326,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
 
-	// 通过串行调度器选号，消除同分组并发请求的 TOCTOU 竞争
-	gs := s.getOrCreateGroupScheduler(derefGroupID(groupID))
+	// 通过串行调度器选号，消除同分组同模型并发请求的 TOCTOU 竞争
+	// key = "groupID:model"，同组不同模型独立串行，避免 opus/sonnet/haiku 互相阻塞
+	schedulerKey := fmt.Sprintf("%d:%s", derefGroupID(groupID), requestedModel)
+	gs := s.getOrCreateGroupScheduler(schedulerKey)
 	task := &groupScheduleTask{
 		ctx:              ctx,
 		group:            group,
