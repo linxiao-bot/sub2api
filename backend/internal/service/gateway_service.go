@@ -1467,6 +1467,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			// 严格优先级：粘性账号不是最小优先级时直接忽略粘性，走 Layer 2 重新选择，
 			// 确保低优先级账号被打满后才溢出到高优先级账号。
 			if ok && account.Priority > minPriorityAmongAccounts(accounts) {
+				if s.debugModelRoutingEnabled() {
+					logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d min_priority=%d",
+						derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, minPriorityAmongAccounts(accounts))
+				}
 				ok = false
 			}
 			if ok {
@@ -1491,6 +1495,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							result.ReleaseFunc() // 释放槽位，继续到 Layer 2
 						} else {
+							if s.debugModelRoutingEnabled() {
+								logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 sticky hit: group_id=%v model=%s session=%s account=%d priority=%d",
+									derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority)
+							}
 							return &AccountSelectionResult{
 								Account:     account,
 								Acquired:    true,
@@ -1612,6 +1620,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				} else {
 					if sessionHash != "" && s.cache != nil {
 						_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.account.ID, stickySessionTTL)
+					}
+					if s.debugModelRoutingEnabled() {
+						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer2 selected: group_id=%v model=%s session=%s account=%d priority=%d load=%d%%",
+							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.account.ID, selected.account.Priority, selected.loadInfo.LoadRate)
 					}
 					return &AccountSelectionResult{
 						Account:     selected.account,
