@@ -382,6 +382,11 @@ type GatewayCache interface {
 	// SetSessionAccountID 设置粘性会话与账号的绑定关系
 	// Set the binding between sticky session and account
 	SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error
+	// SetSessionAccountIDIfBetter 仅当新账号优先级低于当前绑定时才更新，防止并发写入时更差账号覆盖更好账号。
+	// 返回 true 表示 Redis 实际完成了写入；返回 false 表示当前已有更优 sticky，本次写入被拒绝。
+	// Update sticky only if the new account has a lower (better) priority than the current binding.
+	// Returns true if Redis actually wrote the value; false if a better binding already exists.
+	SetSessionAccountIDIfBetter(ctx context.Context, groupID int64, sessionHash string, accountID int64, priority int, ttl time.Duration) (bool, error)
 	// RefreshSessionTTL 刷新粘性会话的过期时间
 	// Refresh the expiration time of a sticky session
 	RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error
@@ -1521,7 +1526,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							continue
 						}
 						if sessionHash != "" && s.cache != nil {
-							_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, item.account.ID, stickySessionTTL)
+							_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, item.account.ID, item.account.Priority, stickySessionTTL)
 						}
 						if s.debugModelRoutingEnabled() {
 							logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
@@ -1567,32 +1572,27 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, ok := accountByID[accountID]
-			// 严格优先级抢占：检测到低优先级账号有余量时，直接在目标账号上拿槽（与检测用同一快照）。
-			// 拿槽成功 → 绑定迁移；拿槽失败（TOCTOU：目标已满）→ 保留 sticky，不落到 Layer 2 打散。
-			// 这样并发请求会收敛到同一目标账号，而不是被 Layer 2 分散到不同账号。
+			// 严格优先级抢占：检测到更低优先级账号有余量时，直接在目标账号上拿槽。
+			// 拿槽成功 → 用 SetSessionAccountIDIfBetter 写入 Redis（只允许向更好方向更新），
+			//             防止并发请求用更差账号覆盖更好账号（last-writer-wins 问题）。
+			// 拿槽失败（TOCTOU：目标已满）→ 保留 sticky，不落到 Layer 2 打散。
 			if ok && account.Priority > minPriorityAmongAccountPtrs(nonStickyCandidates) {
 				if target := s.findLowestPriorityAccountWithCapacity(ctx, nonStickyCandidates, account.Priority); target != nil {
 					if s.debugModelRoutingEnabled() {
 						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt attempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d target_account=%d target_priority=%d",
 							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, target.ID, target.Priority)
 					}
-					// 直接在目标账号拿槽，消除 TOCTOU
-					if s.isAccountSchedulableForSelection(target) &&
-						s.isAccountAllowedForPlatform(target, platform, useMixed) &&
-						(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, target, requestedModel)) &&
-						s.isAccountSchedulableForModelSelection(ctx, target, requestedModel) &&
-						s.isAccountSchedulableForQuota(target) &&
-						s.isAccountSchedulableForWindowCost(ctx, target, true) &&
-						s.isAccountSchedulableForRPM(ctx, target, true) {
-						slotResult, slotErr := s.tryAcquireAccountSlot(ctx, target.ID, target.Concurrency)
-						if slotErr == nil && slotResult.Acquired {
-							if !s.checkAndRegisterSession(ctx, target, sessionHash) {
-								slotResult.ReleaseFunc()
-								// session 限制满，继续走原始 sticky 逻辑
-							} else {
-								if sessionHash != "" && s.cache != nil {
-									_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, target.ID, stickySessionTTL)
-								}
+					slotResult, slotErr := s.tryAcquireAccountSlot(ctx, target.ID, target.Concurrency)
+					if slotErr == nil && slotResult.Acquired {
+						if !s.checkAndRegisterSession(ctx, target, sessionHash) {
+							slotResult.ReleaseFunc()
+							// session 限制满，继续走原始 sticky 逻辑
+						} else {
+							written := true
+							if sessionHash != "" && s.cache != nil {
+								written, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, target.ID, target.Priority, stickySessionTTL)
+							}
+							if written {
 								if s.debugModelRoutingEnabled() {
 									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt success: group_id=%v model=%s session=%s account=%d priority=%d",
 										derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), target.ID, target.Priority)
@@ -1603,9 +1603,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 									ReleaseFunc: slotResult.ReleaseFunc,
 								}, nil
 							}
+							// CAS 被拒绝：并发请求已绑定了更好账号，释放本次槽位，继续用原始 sticky
+							slotResult.ReleaseFunc()
 						}
-						// 拿槽失败（TOCTOU：目标已满）→ 不修改 ok，继续用原始 sticky 账号
 					}
+					// 拿槽失败（TOCTOU：目标已满）或 CAS 被拒绝 → 不修改 ok，继续用原始 sticky 账号
 				}
 			}
 			if ok {
@@ -1720,7 +1722,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				} else {
 					if sessionHash != "" && s.cache != nil {
-						_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.account.ID, stickySessionTTL)
+						_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.account.ID, selected.account.Priority, stickySessionTTL)
 					}
 					if s.debugModelRoutingEnabled() {
 						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer2 selected: group_id=%v model=%s session=%s account=%d priority=%d load=%d%%",
@@ -1779,7 +1781,7 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 				continue
 			}
 			if sessionHash != "" && s.cache != nil {
-				_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, acc.ID, stickySessionTTL)
+				_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, acc.ID, acc.Priority, stickySessionTTL)
 			}
 			return &AccountSelectionResult{
 				Account:     acc,
@@ -2987,9 +2989,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
-				if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
-					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
-				}
+				_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.ID, selected.Priority, stickySessionTTL)
 			}
 			if s.debugModelRoutingEnabled() {
 				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
@@ -3097,9 +3097,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 
 	// 4. 建立粘性绑定
 	if sessionHash != "" && s.cache != nil {
-		if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
-			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
-		}
+		_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.ID, selected.Priority, stickySessionTTL)
 	}
 
 	return selected, nil
@@ -3223,9 +3221,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
-				if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
-					logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
-				}
+				_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.ID, selected.Priority, stickySessionTTL)
 			}
 			if s.debugModelRoutingEnabled() {
 				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.ID)
@@ -3335,9 +3331,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 
 	// 4. 建立粘性绑定
 	if sessionHash != "" && s.cache != nil {
-		if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, selected.ID, stickySessionTTL); err != nil {
-			logger.LegacyPrintf("service.gateway", "set session account failed: session=%s account_id=%d err=%v", sessionHash, selected.ID, err)
-		}
+		_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.ID, selected.Priority, stickySessionTTL)
 	}
 
 	return selected, nil
