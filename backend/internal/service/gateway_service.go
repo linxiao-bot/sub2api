@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -572,6 +573,10 @@ type GatewayService struct {
 	debugClaudeMimic      atomic.Bool
 	debugGatewayBodyFile  atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
 	tlsFPProfileService   *TLSFingerprintProfileService
+
+	// 串行调度器：每个分组一个 goroutine，消除并发 TOCTOU（见 gateway_serial_scheduler.go）
+	groupSchedulers   map[int64]*groupScheduler
+	groupSchedulersMu sync.Mutex
 }
 
 // NewGatewayService creates a new GatewayService
@@ -631,6 +636,7 @@ func NewGatewayService(
 		modelsListCacheTTL:   modelsListTTL,
 		responseHeaderFilter: compileResponseHeaderFilter(cfg),
 		tlsFPProfileService:  tlsFPProfileService,
+		groupSchedulers:      make(map[int64]*groupScheduler),
 	}
 	svc.userGroupRateResolver = newUserGroupRateResolver(
 		userGroupRateRepo,
@@ -1306,7 +1312,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 	preferOAuth := platform == PlatformGemini
 	if s.debugModelRoutingEnabled() && platform == PlatformAnthropic && requestedModel != "" {
-		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] load-aware enabled: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)
+		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] serial-scheduler: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)
 	}
 
 	accounts, useMixed, err := s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
@@ -1316,457 +1322,31 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	if len(accounts) == 0 {
 		return nil, ErrNoAvailableAccounts
 	}
+	// 窗口费用和 RPM 变化慢，在串行 goroutine 外预取，减少 goroutine 内 Redis 往返
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
 
-	isExcluded := func(accountID int64) bool {
-		if excludedIDs == nil {
-			return false
-		}
-		_, excluded := excludedIDs[accountID]
-		return excluded
+	// 通过串行调度器选号，消除同分组并发请求的 TOCTOU 竞争
+	gs := s.getOrCreateGroupScheduler(derefGroupID(groupID))
+	task := &groupScheduleTask{
+		ctx:              ctx,
+		group:            group,
+		groupID:          groupID,
+		sessionHash:      sessionHash,
+		requestedModel:   requestedModel,
+		excludedIDs:      excludedIDs,
+		stickyAccountID:  stickyAccountID,
+		accounts:         accounts,
+		platform:         platform,
+		hasForcePlatform: hasForcePlatform,
+		useMixed:         useMixed,
+		preferOAuth:      preferOAuth,
+		cfg:              cfg,
+		result:           make(chan groupScheduleResult, 1),
 	}
-
-	// 提前构建 accountByID（供 Layer 1 和 Layer 1.5 使用）
-	accountByID := make(map[int64]*Account, len(accounts))
-	for i := range accounts {
-		accountByID[accounts[i].ID] = &accounts[i]
-	}
-
-	// 获取模型路由配置（仅 anthropic 平台）
-	var routingAccountIDs []int64
-	if group != nil && requestedModel != "" && group.Platform == PlatformAnthropic {
-		routingAccountIDs = group.GetRoutingAccountIDs(requestedModel)
-		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v session=%s sticky_account=%d",
-				group.ID, requestedModel, group.ModelRoutingEnabled, len(group.ModelRouting), routingAccountIDs, shortSessionHash(sessionHash), stickyAccountID)
-			if len(routingAccountIDs) == 0 && group.ModelRoutingEnabled && len(group.ModelRouting) > 0 {
-				keys := make([]string, 0, len(group.ModelRouting))
-				for k := range group.ModelRouting {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys)
-				const maxKeys = 20
-				if len(keys) > maxKeys {
-					keys = keys[:maxKeys]
-				}
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing miss: group_id=%d model=%s patterns(sample)=%v", group.ID, requestedModel, keys)
-			}
-		}
-	}
-
-	// ============ Layer 1: 模型路由优先选择（优先级高于粘性会话） ============
-	if len(routingAccountIDs) > 0 && s.concurrencyService != nil {
-		// 1. 过滤出路由列表中可调度的账号
-		var routingCandidates []*Account
-		var filteredExcluded, filteredMissing, filteredUnsched, filteredPlatform, filteredModelScope, filteredModelMapping, filteredWindowCost int
-		var modelScopeSkippedIDs []int64 // 记录因模型限流被跳过的账号 ID
-		for _, routingAccountID := range routingAccountIDs {
-			if isExcluded(routingAccountID) {
-				filteredExcluded++
-				continue
-			}
-			account, ok := accountByID[routingAccountID]
-			if !ok || !s.isAccountSchedulableForSelection(account) {
-				if !ok {
-					filteredMissing++
-				} else {
-					filteredUnsched++
-				}
-				continue
-			}
-			if !s.isAccountAllowedForPlatform(account, platform, useMixed) {
-				filteredPlatform++
-				continue
-			}
-			if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, account, requestedModel) {
-				filteredModelMapping++
-				continue
-			}
-			if !s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) {
-				filteredModelScope++
-				modelScopeSkippedIDs = append(modelScopeSkippedIDs, account.ID)
-				continue
-			}
-			// 配额检查
-			if !s.isAccountSchedulableForQuota(account) {
-				continue
-			}
-			// 窗口费用检查（非粘性会话路径）
-			if !s.isAccountSchedulableForWindowCost(ctx, account, false) {
-				filteredWindowCost++
-				continue
-			}
-			// RPM 检查（非粘性会话路径）
-			if !s.isAccountSchedulableForRPM(ctx, account, false) {
-				continue
-			}
-			routingCandidates = append(routingCandidates, account)
-		}
-
-		if s.debugModelRoutingEnabled() {
-			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed candidates: group_id=%v model=%s routed=%d candidates=%d filtered(excluded=%d missing=%d unsched=%d platform=%d model_scope=%d model_mapping=%d window_cost=%d)",
-				derefGroupID(groupID), requestedModel, len(routingAccountIDs), len(routingCandidates),
-				filteredExcluded, filteredMissing, filteredUnsched, filteredPlatform, filteredModelScope, filteredModelMapping, filteredWindowCost)
-			if len(modelScopeSkippedIDs) > 0 {
-				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] model_rate_limited accounts skipped: group_id=%v model=%s account_ids=%v",
-					derefGroupID(groupID), requestedModel, modelScopeSkippedIDs)
-			}
-		}
-
-		if len(routingCandidates) > 0 {
-			// 1.5. 在路由账号范围内检查粘性会话
-			if sessionHash != "" && stickyAccountID > 0 {
-				if containsInt64(routingAccountIDs, stickyAccountID) && !isExcluded(stickyAccountID) {
-					// 粘性账号在路由列表中，优先使用
-					if stickyAccount, ok := accountByID[stickyAccountID]; ok {
-						if s.isAccountSchedulableForSelection(stickyAccount) &&
-							s.isAccountAllowedForPlatform(stickyAccount, platform, useMixed) &&
-							(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, stickyAccount, requestedModel)) &&
-							s.isAccountSchedulableForModelSelection(ctx, stickyAccount, requestedModel) &&
-							s.isAccountSchedulableForQuota(stickyAccount) &&
-							s.isAccountSchedulableForWindowCost(ctx, stickyAccount, true) &&
-
-							s.isAccountSchedulableForRPM(ctx, stickyAccount, true) { // 粘性会话窗口费用+RPM 检查
-							result, err := s.tryAcquireAccountSlot(ctx, stickyAccountID, stickyAccount.Concurrency)
-							if err == nil && result.Acquired {
-								// 会话数量限制检查
-								if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
-									result.ReleaseFunc() // 释放槽位
-									// 继续到负载感知选择
-								} else {
-									if s.debugModelRoutingEnabled() {
-										logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), stickyAccountID)
-									}
-									return &AccountSelectionResult{
-										Account:     stickyAccount,
-										Acquired:    true,
-										ReleaseFunc: result.ReleaseFunc,
-									}, nil
-								}
-							}
-
-							waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-							if waitingCount < cfg.StickySessionMaxWaiting {
-								// 会话数量限制检查（等待计划也需要占用会话配额）
-								if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
-									// 会话限制已满，继续到负载感知选择
-								} else {
-									return &AccountSelectionResult{
-										Account: stickyAccount,
-										WaitPlan: &AccountWaitPlan{
-											AccountID:      stickyAccountID,
-											MaxConcurrency: stickyAccount.Concurrency,
-											Timeout:        cfg.StickySessionWaitTimeout,
-											MaxWaiting:     cfg.StickySessionMaxWaiting,
-										},
-									}, nil
-								}
-							}
-							// 粘性账号槽位满且等待队列已满，继续使用负载感知选择
-						}
-					} else {
-						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-					}
-				}
-			}
-
-			// 2. 批量获取负载信息
-			routingLoads := make([]AccountWithConcurrency, 0, len(routingCandidates))
-			for _, acc := range routingCandidates {
-				routingLoads = append(routingLoads, AccountWithConcurrency{
-					ID:             acc.ID,
-					MaxConcurrency: acc.EffectiveLoadFactor(),
-				})
-			}
-			routingLoadMap, _ := s.concurrencyService.GetAccountsLoadBatch(ctx, routingLoads)
-
-			// 3. 按负载感知排序
-			var routingAvailable []accountWithLoad
-			for _, acc := range routingCandidates {
-				loadInfo := routingLoadMap[acc.ID]
-				if loadInfo == nil {
-					loadInfo = &AccountLoadInfo{AccountID: acc.ID}
-				}
-				if loadInfo.LoadRate < 100 {
-					routingAvailable = append(routingAvailable, accountWithLoad{account: acc, loadInfo: loadInfo})
-				}
-			}
-
-			if len(routingAvailable) > 0 {
-				// 排序：优先级 > 负载率 > 最后使用时间
-				sort.SliceStable(routingAvailable, func(i, j int) bool {
-					a, b := routingAvailable[i], routingAvailable[j]
-					if a.account.Priority != b.account.Priority {
-						return a.account.Priority < b.account.Priority
-					}
-					if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
-						return a.loadInfo.LoadRate < b.loadInfo.LoadRate
-					}
-					switch {
-					case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
-						return true
-					case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
-						return false
-					case a.account.LastUsedAt == nil && b.account.LastUsedAt == nil:
-						return false
-					default:
-						return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
-					}
-				})
-				shuffleWithinSortGroups(routingAvailable)
-
-				// 4. 尝试获取槽位
-				for _, item := range routingAvailable {
-					result, err := s.tryAcquireAccountSlot(ctx, item.account.ID, item.account.Concurrency)
-					if err == nil && result.Acquired {
-						// 会话数量限制检查
-						if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
-							result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
-							continue
-						}
-						if sessionHash != "" && s.cache != nil {
-							_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, item.account.ID, item.account.Priority, stickySessionTTL)
-						}
-						if s.debugModelRoutingEnabled() {
-							logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed select: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
-						}
-						return &AccountSelectionResult{
-							Account:     item.account,
-							Acquired:    true,
-							ReleaseFunc: result.ReleaseFunc,
-						}, nil
-					}
-				}
-
-				// 5. 所有路由账号槽位满，尝试返回等待计划（选择负载最低的）
-				// 遍历找到第一个满足会话限制的账号
-				for _, item := range routingAvailable {
-					if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
-						continue // 会话限制已满，尝试下一个
-					}
-					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed wait: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
-					}
-					return &AccountSelectionResult{
-						Account: item.account,
-						WaitPlan: &AccountWaitPlan{
-							AccountID:      item.account.ID,
-							MaxConcurrency: item.account.Concurrency,
-							Timeout:        cfg.StickySessionWaitTimeout,
-							MaxWaiting:     cfg.StickySessionMaxWaiting,
-						},
-					}, nil
-				}
-				// 所有路由账号会话限制都已满，继续到 Layer 2 回退
-			}
-			// 路由列表中的账号都不可用（负载率 >= 100），继续到 Layer 2 回退
-			logger.LegacyPrintf("service.gateway", "[ModelRouting] All routed accounts unavailable for model=%s, falling back to normal selection", requestedModel)
-		}
-	}
-
-	nonStickyCandidates := s.buildLoadAwareCandidates(ctx, accounts, excludedIDs, platform, useMixed, requestedModel)
-
-	// ============ Layer 1.5: 粘性会话（仅在无模型路由配置时生效） ============
-	if len(routingAccountIDs) == 0 && sessionHash != "" && stickyAccountID > 0 && !isExcluded(stickyAccountID) {
-		accountID := stickyAccountID
-		if accountID > 0 && !isExcluded(accountID) {
-			account, ok := accountByID[accountID]
-			// 严格优先级抢占：检测到更低优先级账号有余量时，直接在目标账号上拿槽。
-			// 拿槽成功 → 用 SetSessionAccountIDIfBetter 写入 Redis（只允许向更好方向更新），
-			//             防止并发请求用更差账号覆盖更好账号（last-writer-wins 问题）。
-			// 拿槽失败（TOCTOU：目标已满）→ 保留 sticky，不落到 Layer 2 打散。
-			if ok && account.Priority > minPriorityAmongAccountPtrs(nonStickyCandidates) {
-				if target := s.findLowestPriorityAccountWithCapacity(ctx, nonStickyCandidates, account.Priority); target != nil {
-					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt attempt: group_id=%v model=%s session=%s sticky_account=%d priority=%d target_account=%d target_priority=%d",
-							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority, target.ID, target.Priority)
-					}
-					slotResult, slotErr := s.tryAcquireAccountSlot(ctx, target.ID, target.Concurrency)
-					if slotErr == nil && slotResult.Acquired {
-						if !s.checkAndRegisterSession(ctx, target, sessionHash) {
-							slotResult.ReleaseFunc()
-							// session 限制满，继续走原始 sticky 逻辑
-						} else {
-							written := true
-							if sessionHash != "" && s.cache != nil {
-								written, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, target.ID, target.Priority, stickySessionTTL)
-							}
-							if written {
-								if s.debugModelRoutingEnabled() {
-									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 preempt success: group_id=%v model=%s session=%s account=%d priority=%d",
-										derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), target.ID, target.Priority)
-								}
-								return &AccountSelectionResult{
-									Account:     target,
-									Acquired:    true,
-									ReleaseFunc: slotResult.ReleaseFunc,
-								}, nil
-							}
-							// CAS 被拒绝：并发请求已绑定了更好账号，释放本次槽位，继续用原始 sticky
-							slotResult.ReleaseFunc()
-						}
-					}
-					// 拿槽失败（TOCTOU：目标已满）或 CAS 被拒绝 → 不修改 ok，继续用原始 sticky 账号
-				}
-			}
-			if ok {
-				// 检查账户是否需要清理粘性会话绑定
-				// Check if the account needs sticky session cleanup
-				clearSticky := shouldClearStickySession(account, requestedModel)
-				if clearSticky {
-					_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-				}
-				if !clearSticky && s.isAccountInGroup(account, groupID) &&
-					s.isAccountAllowedForPlatform(account, platform, useMixed) &&
-					(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) &&
-					s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) &&
-					s.isAccountSchedulableForQuota(account) &&
-					s.isAccountSchedulableForWindowCost(ctx, account, true) &&
-
-					s.isAccountSchedulableForRPM(ctx, account, true) { // 粘性会话窗口费用+RPM 检查
-					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
-					if err == nil && result.Acquired {
-						// 会话数量限制检查
-						// Session count limit check
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-							result.ReleaseFunc() // 释放槽位，继续到 Layer 2
-						} else {
-							if s.debugModelRoutingEnabled() {
-								logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer1.5 sticky hit: group_id=%v model=%s session=%s account=%d priority=%d",
-									derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID, account.Priority)
-							}
-							return &AccountSelectionResult{
-								Account:     account,
-								Acquired:    true,
-								ReleaseFunc: result.ReleaseFunc,
-							}, nil
-						}
-					}
-
-					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-					if waitingCount < cfg.StickySessionMaxWaiting {
-						// 会话数量限制检查（等待计划也需要占用会话配额）
-						// Session count limit check (wait plan also requires session quota)
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-							// 会话限制已满，继续到 Layer 2
-							// Session limit full, continue to Layer 2
-						} else {
-							return &AccountSelectionResult{
-								Account: account,
-								WaitPlan: &AccountWaitPlan{
-									AccountID:      accountID,
-									MaxConcurrency: account.Concurrency,
-									Timeout:        cfg.StickySessionWaitTimeout,
-									MaxWaiting:     cfg.StickySessionMaxWaiting,
-								},
-							}, nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// ============ Layer 2: 负载感知选择 ============
-	candidates := nonStickyCandidates
-
-	if len(candidates) == 0 {
-		return nil, ErrNoAvailableAccounts
-	}
-
-	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
-	for _, acc := range candidates {
-		accountLoads = append(accountLoads, AccountWithConcurrency{
-			ID:             acc.ID,
-			MaxConcurrency: acc.EffectiveLoadFactor(),
-		})
-	}
-
-	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
-	if err != nil {
-		if result, ok := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); ok {
-			return result, nil
-		}
-	} else {
-		var available []accountWithLoad
-		for _, acc := range candidates {
-			loadInfo := loadMap[acc.ID]
-			if loadInfo == nil {
-				loadInfo = &AccountLoadInfo{AccountID: acc.ID}
-			}
-			if loadInfo.LoadRate < 100 {
-				available = append(available, accountWithLoad{
-					account:  acc,
-					loadInfo: loadInfo,
-				})
-			}
-		}
-
-		// 分层过滤选择：优先级 → 负载率 → LRU
-		for len(available) > 0 {
-			// 1. 取优先级最小的集合
-			candidates := filterByMinPriority(available)
-			// 2. 取负载率最低的集合
-			candidates = filterByMinLoadRate(candidates)
-			// 3. LRU 选择最久未用的账号
-			selected := selectByLRU(candidates, preferOAuth)
-			if selected == nil {
-				break
-			}
-
-			result, err := s.tryAcquireAccountSlot(ctx, selected.account.ID, selected.account.Concurrency)
-			if err == nil && result.Acquired {
-				// 会话数量限制检查
-				if !s.checkAndRegisterSession(ctx, selected.account, sessionHash) {
-					result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
-				} else {
-					if sessionHash != "" && s.cache != nil {
-						_, _ = s.cache.SetSessionAccountIDIfBetter(ctx, derefGroupID(groupID), sessionHash, selected.account.ID, selected.account.Priority, stickySessionTTL)
-					}
-					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] layer2 selected: group_id=%v model=%s session=%s account=%d priority=%d load=%d%%",
-							derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), selected.account.ID, selected.account.Priority, selected.loadInfo.LoadRate)
-					}
-					return &AccountSelectionResult{
-						Account:     selected.account,
-						Acquired:    true,
-						ReleaseFunc: result.ReleaseFunc,
-					}, nil
-				}
-			}
-
-			// 移除已尝试的账号，重新进行分层过滤
-			selectedID := selected.account.ID
-			newAvailable := make([]accountWithLoad, 0, len(available)-1)
-			for _, acc := range available {
-				if acc.account.ID != selectedID {
-					newAvailable = append(newAvailable, acc)
-				}
-			}
-			available = newAvailable
-		}
-	}
-
-	// ============ Layer 3: 兜底排队 ============
-	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
-	for _, acc := range candidates {
-		// 会话数量限制检查（等待计划也需要占用会话配额）
-		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
-			continue // 会话限制已满，尝试下一个账号
-		}
-		return &AccountSelectionResult{
-			Account: acc,
-			WaitPlan: &AccountWaitPlan{
-				AccountID:      acc.ID,
-				MaxConcurrency: acc.Concurrency,
-				Timeout:        cfg.FallbackWaitTimeout,
-				MaxWaiting:     cfg.FallbackMaxWaiting,
-			},
-		}, nil
-	}
-	return nil, ErrNoAvailableAccounts
+	return gs.schedule(task)
 }
+
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool) {
 	ordered := append([]*Account(nil), candidates...)

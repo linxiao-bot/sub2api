@@ -3417,8 +3417,11 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 		require.Equal(t, int64(1), result.Account.ID, "应复用绑定的 priority=100 账号")
 	})
 
-	t.Run("粘性账号非最低优先级且低优先级有空位-抢占迁移", func(t *testing.T) {
-		// session 绑定在 priority=101，但 priority=100 有空余 → 抢占，迁移到 priority=100
+	t.Run("粘性账号非最低优先级且低优先级有空位-保留粘性复用缓存", func(t *testing.T) {
+		// 串行调度器设计：不做主动抢占，保留粘性会话以复用 KV 缓存。
+		// session 绑定在 priority=101（有空余），priority=100 也有空余。
+		// 期望：复用 priority=101 的粘性账号（缓存命中），不迁移到 priority=100。
+		// 新会话（无 sticky）才会从 priority=100 开始分配，逐步实现集中化。
 		repo := newRepo([]Account{
 			{ID: 1, Platform: PlatformAnthropic, Priority: 100, Status: StatusActive, Schedulable: true, Concurrency: 10},
 			{ID: 2, Platform: PlatformAnthropic, Priority: 101, Status: StatusActive, Schedulable: true, Concurrency: 10},
@@ -3443,8 +3446,8 @@ func TestGatewayService_PriorityPreemption(t *testing.T) {
 
 		result, err := svc.SelectAccountWithLoadAwareness(ctx, nil, "sess", "", nil, "")
 		require.NoError(t, err)
-		require.Equal(t, int64(1), result.Account.ID, "应迁移到 priority=100 账号")
-		require.Equal(t, int64(1), cache.sessionBindings["sess"], "session 应重新绑定到 priority=100 账号")
+		require.Equal(t, int64(2), result.Account.ID, "应保留粘性账号 priority=101 以复用缓存，不抢占迁移")
+		require.Equal(t, int64(2), cache.sessionBindings["sess"], "session 绑定应保持不变")
 	})
 
 	t.Run("粘性账号非最低优先级但低优先级满载-保留粘性避免抖动", func(t *testing.T) {
